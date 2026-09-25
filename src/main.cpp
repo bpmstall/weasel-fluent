@@ -875,6 +875,14 @@ int main(int argc, char* argv[]) {
         return app.exec();
     }
 
+    // Single-instance guard for background service
+    HANDLE hSingleMutex = CreateMutexW(nullptr, FALSE, L"WeaselFluentSingleInstanceMutex");
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        std::cerr << "[INFO] Weasel-Fluent service is already running. Exiting duplicate instance.\n";
+        if (hSingleMutex) CloseHandle(hSingleMutex);
+        return 0;
+    }
+
     // 1. Native TSF IPC Server (High-precision caret tracking and system IME pipeline)
     IpcServer ipcServer(&engine, &candWin);
     bool ipcOk = ipcServer.start();

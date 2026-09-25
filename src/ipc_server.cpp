@@ -4,6 +4,7 @@
 #include <QCoreApplication>
 #include <QDebug>
 #include <iostream>
+#include <sddl.h>
 
 IpcServer::IpcServer(RimeEngine* engine, CandidateWindow* candWin, QObject* parent)
     : QObject(parent), m_engine(engine), m_candWin(candWin) {
@@ -67,6 +68,16 @@ void IpcServer::stop() {
 }
 
 void IpcServer::serverLoop() {
+    SECURITY_ATTRIBUTES sa = { sizeof(sa), nullptr, FALSE };
+    PSECURITY_DESCRIPTOR pSD = nullptr;
+    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            L"D:(A;;GRGW;;;WD)(A;;GRGW;;;AC)S:(ML;;NW;;;LW)",
+            SDDL_REVISION_1,
+            &pSD,
+            nullptr)) {
+        sa.lpSecurityDescriptor = pSD;
+    }
+
     while (m_running) {
         HANDLE hPipe = CreateNamedPipeW(
             WEASEL_PIPE_NAME,
@@ -75,8 +86,8 @@ void IpcServer::serverLoop() {
             PIPE_UNLIMITED_INSTANCES,
             sizeof(IpcKeyResponse) * 2,
             sizeof(IpcKeyRequest) * 2,
-            100,
-            nullptr
+            200,
+            sa.lpSecurityDescriptor ? &sa : nullptr
         );
 
         if (hPipe == INVALID_HANDLE_VALUE) {
@@ -249,5 +260,9 @@ void IpcServer::serverLoop() {
         FlushFileBuffers(hPipe);
         DisconnectNamedPipe(hPipe);
         CloseHandle(hPipe);
+    }
+
+    if (pSD) {
+        LocalFree(pSD);
     }
 }

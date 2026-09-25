@@ -97,7 +97,7 @@ bool IpcClient::sendKey(DWORD vkCode, bool isKeyDown, const RECT& caretRect, HWN
     req.caretRect = caretRect;
     req.hwnd = reinterpret_cast<uint64_t>(hwnd);
 
-    // Use fast CallNamedPipeW with 40ms timeout to ensure zero host thread delay
+    // Use fast CallNamedPipeW with 150ms timeout and busy retry
     DWORD bytesRead = 0;
     BOOL ok = CallNamedPipeW(
         WEASEL_PIPE_NAME,
@@ -106,15 +106,31 @@ bool IpcClient::sendKey(DWORD vkCode, bool isKeyDown, const RECT& caretRect, HWN
         pResponse,
         sizeof(IpcKeyResponse),
         &bytesRead,
-        40
+        150
     );
+
+    if (!ok && GetLastError() == ERROR_PIPE_BUSY) {
+        if (WaitNamedPipeW(WEASEL_PIPE_NAME, 100)) {
+            ok = CallNamedPipeW(
+                WEASEL_PIPE_NAME,
+                &req,
+                sizeof(req),
+                pResponse,
+                sizeof(IpcKeyResponse),
+                &bytesRead,
+                150
+            );
+        }
+    }
 
     if (ok && bytesRead >= sizeof(uint32_t) * 3) {
         return true;
     }
 
-    // Fallback: If CallNamedPipe failed, server might need start
-    tryLaunchServer();
+    // Only try to launch server if the pipe truly does not exist
+    if (GetLastError() == ERROR_FILE_NOT_FOUND) {
+        tryLaunchServer();
+    }
     return false;
 }
 
@@ -125,7 +141,7 @@ void IpcClient::notifyActivate(HWND hwnd) {
 
     DWORD bytesRead = 0;
     IpcKeyResponse resp = {};
-    CallNamedPipeW(WEASEL_PIPE_NAME, &req, sizeof(req), &resp, sizeof(resp), &bytesRead, 20);
+    CallNamedPipeW(WEASEL_PIPE_NAME, &req, sizeof(req), &resp, sizeof(resp), &bytesRead, 50);
 }
 
 void IpcClient::notifyDeactivate() {
@@ -134,5 +150,5 @@ void IpcClient::notifyDeactivate() {
 
     DWORD bytesRead = 0;
     IpcKeyResponse resp = {};
-    CallNamedPipeW(WEASEL_PIPE_NAME, &req, sizeof(req), &resp, sizeof(resp), &bytesRead, 20);
+    CallNamedPipeW(WEASEL_PIPE_NAME, &req, sizeof(req), &resp, sizeof(resp), &bytesRead, 50);
 }

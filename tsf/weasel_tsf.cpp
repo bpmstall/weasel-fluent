@@ -1,5 +1,6 @@
 #include "weasel_tsf.h"
 #include "ipc_client.h"
+#include <vector>
 
 // EditSession to query exact caret bounding box from TSF
 class CCaretEditSession : public ITfEditSession {
@@ -31,17 +32,20 @@ public:
 
     STDMETHODIMP DoEditSession(TfEditCookie ec) override {
         if (!m_pContext || !m_pRect) return E_FAIL;
+        m_pRect->left = m_pRect->top = m_pRect->right = m_pRect->bottom = 0;
+
         ITfContextView* pView = nullptr;
         if (SUCCEEDED(m_pContext->GetActiveView(&pView)) && pView) {
             TF_SELECTION sel = {};
             ULONG cFetched = 0;
-            if (SUCCEEDED(m_pContext->GetSelection(ec, TF_DEFAULT_SELECTION, 1, &sel, &cFetched)) && cFetched > 0) {
+            if (SUCCEEDED(m_pContext->GetSelection(ec, TF_DEFAULT_SELECTION, 1, &sel, &cFetched)) && cFetched > 0 && sel.range) {
                 BOOL fClipped = FALSE;
                 HRESULT hr = pView->GetTextExt(ec, sel.range, m_pRect, &fClipped);
-                if (FAILED(hr) || (m_pRect->left == 0 && m_pRect->right == 0 && m_pRect->top == 0 && m_pRect->bottom == 0)) {
-                    pView->GetScreenExt(m_pRect);
+                if (FAILED(hr) || (m_pRect->right <= m_pRect->left && m_pRect->bottom <= m_pRect->top)) {
+                    // Reset to 0 so proper fallback is used
+                    m_pRect->left = m_pRect->top = m_pRect->right = m_pRect->bottom = 0;
                 }
-                if (sel.range) sel.range->Release();
+                sel.range->Release();
             }
             pView->Release();
         }
@@ -54,7 +58,7 @@ private:
     RECT* m_pRect;
 };
 
-// EditSession to commit text into document via ITfInsertAtSelection
+// EditSession to commit text into document via ITfInsertAtSelection or range SetText
 class CCommitEditSession : public ITfEditSession {
 public:
     CCommitEditSession(ITfContext* pContext, const std::wstring& text)
@@ -84,14 +88,33 @@ public:
 
     STDMETHODIMP DoEditSession(TfEditCookie ec) override {
         if (!m_pContext || m_text.empty()) return E_FAIL;
+        bool committed = false;
+
         ITfInsertAtSelection* pInsert = nullptr;
         if (SUCCEEDED(m_pContext->QueryInterface(IID_ITfInsertAtSelection, reinterpret_cast<void**>(&pInsert))) && pInsert) {
             ITfRange* pRange = nullptr;
-            pInsert->InsertTextAtSelection(ec, 0, m_text.c_str(), static_cast<LONG>(m_text.length()), &pRange);
+            HRESULT hr = pInsert->InsertTextAtSelection(ec, 0, m_text.c_str(), static_cast<LONG>(m_text.length()), &pRange);
+            if (SUCCEEDED(hr)) {
+                committed = true;
+            }
             if (pRange) pRange->Release();
             pInsert->Release();
         }
-        return S_OK;
+
+        if (!committed) {
+            TF_SELECTION sel = {};
+            ULONG cFetched = 0;
+            if (SUCCEEDED(m_pContext->GetSelection(ec, TF_DEFAULT_SELECTION, 1, &sel, &cFetched)) && cFetched > 0 && sel.range) {
+                HRESULT hr = sel.range->SetText(ec, 0, m_text.c_str(), static_cast<LONG>(m_text.length()));
+                if (SUCCEEDED(hr)) {
+                    sel.range->Collapse(ec, TF_ANCHOR_END);
+                    m_pContext->SetSelection(ec, 1, &sel);
+                    committed = true;
+                }
+                sel.range->Release();
+            }
+        }
+        return committed ? S_OK : E_FAIL;
     }
 
 private:
@@ -269,12 +292,38 @@ RECT CWeaselFluentTextService::queryCaretRect(ITfContext* pic) {
 }
 
 void CWeaselFluentTextService::commitString(ITfContext* pic, const std::wstring& text) {
-    if (!pic || text.empty()) return;
+    if (text.empty()) return;
 
-    CCommitEditSession* pSession = new CCommitEditSession(pic, text);
-    HRESULT hrSession = S_OK;
-    pic->RequestEditSession(m_tid, pSession, TF_ES_SYNC | TF_ES_READWRITE, &hrSession);
-    pSession->Release();
+    bool committed = false;
+    if (pic) {
+        CCommitEditSession* pSession = new CCommitEditSession(pic, text);
+        HRESULT hrSession = S_OK;
+        HRESULT hr = pic->RequestEditSession(m_tid, pSession, TF_ES_SYNC | TF_ES_READWRITE, &hrSession);
+        if (SUCCEEDED(hr) && SUCCEEDED(hrSession)) {
+            committed = true;
+        }
+        pSession->Release();
+    }
+
+    if (!committed) {
+        // Fallback: SendInput with KEYEVENTF_UNICODE ensures committed text is never lost
+        std::vector<INPUT> inputs;
+        inputs.reserve(text.length() * 2);
+        for (wchar_t ch : text) {
+            INPUT down = {};
+            down.type = INPUT_KEYBOARD;
+            down.ki.wScan = ch;
+            down.ki.dwFlags = KEYEVENTF_UNICODE;
+            inputs.push_back(down);
+
+            INPUT up = down;
+            up.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
+            inputs.push_back(up);
+        }
+        if (!inputs.empty()) {
+            SendInput(static_cast<UINT>(inputs.size()), inputs.data(), sizeof(INPUT));
+        }
+    }
 }
 
 // ITfKeyEventSink Implementation
