@@ -516,6 +516,28 @@ void CandidateWindow::updateUiState(const RimeUiState& state) {
     }
 }
 
+void CandidateWindow::moveToPosition(const QPoint& pt) {
+    QScreen* screen = QGuiApplication::screenAt(pt);
+    if (!screen) screen = QGuiApplication::primaryScreen();
+    QRect avail = screen ? screen->availableGeometry() : QRect(0, 0, 1920, 1080);
+
+    int x = pt.x();
+    int y = pt.y();
+    int w = m_calculatedSize.width() > 0 ? m_calculatedSize.width() : width();
+    int h = m_calculatedSize.height() > 0 ? m_calculatedSize.height() : height();
+
+    // If candidate window overflows bottom of screen, flip to above the caret
+    if (y + h > avail.bottom() - 4) {
+        y = pt.y() - h - 28;
+    }
+
+    // Clamp coordinates to screen boundaries with padding
+    x = qBound(avail.left() + 4, x, avail.right() - w - 4);
+    y = qBound(avail.top() + 4, y, avail.bottom() - h - 4);
+
+    move(x, y);
+}
+
 void CandidateWindow::calculateLayout() {
     auto& cfg = AppConfig::instance();
     bool isVertical = (cfg.orientation() == QStringLiteral("vertical"));

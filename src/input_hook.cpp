@@ -32,6 +32,9 @@ void InputHook::setEngine(RimeEngine* engine) {
         connect(m_engine, &RimeEngine::committed, this, [this](const QString& text) {
             sendUnicodeString(text);
             if (m_candWin) {
+                if (m_candWin->isExpanded()) {
+                    m_candWin->toggleExpanded();
+                }
                 m_candWin->hide();
             }
             emit textCommitted(text);
@@ -187,10 +190,17 @@ bool InputHook::handleKey(DWORD vkCode, bool isKeyDown, bool isKeyUp) {
         // While composing:
         if (vkCode >= 'A' && vkCode <= 'Z') {
             if (isKeyDown) {
+                if (m_candWin && m_candWin->isExpanded()) {
+                    int candIdx = 10 + (vkCode - 'A');
+                    if (candIdx < st.candidates.size()) {
+                        m_engine->selectCandidate(candIdx);
+                        return true;
+                    }
+                }
                 char ch = static_cast<char>('a' + (vkCode - 'A'));
                 m_engine->processChar(ch);
                 if (m_candWin) {
-                    m_candWin->move(getCaretPosition());
+                    m_candWin->moveToPosition(getCaretPosition());
                     m_candWin->show();
                 }
             }
@@ -219,6 +229,42 @@ bool InputHook::handleKey(DWORD vkCode, bool isKeyDown, bool isKeyUp) {
             return true;
         }
 
+        // '0' selects candidate index 9 (the 10th candidate)
+        if (vkCode == '0') {
+            if (isKeyDown) {
+                m_engine->selectCandidate(9);
+            }
+            return true;
+        }
+
+        // Paging: '-' / '[' / PageUp for previous page, '=' / ']' / PageDown for next page
+        if (vkCode == VK_OEM_MINUS || vkCode == VK_PRIOR || vkCode == VK_OEM_4) {
+            if (isKeyDown) {
+                m_engine->processKey(RIME_KEY_PAGE_UP);
+            }
+            return true;
+        }
+        if (vkCode == VK_OEM_PLUS || vkCode == VK_NEXT || vkCode == VK_OEM_6) {
+            if (isKeyDown) {
+                m_engine->processKey(RIME_KEY_PAGE_DOWN);
+            }
+            return true;
+        }
+
+        // Arrow keys: Left / Right navigate inside composition, Up / Down navigate candidates
+        if (vkCode == VK_LEFT) {
+            if (isKeyDown) {
+                m_engine->processKey(RIME_KEY_LEFT);
+            }
+            return true;
+        }
+        if (vkCode == VK_RIGHT) {
+            if (isKeyDown) {
+                m_engine->processKey(RIME_KEY_RIGHT);
+            }
+            return true;
+        }
+
         if (vkCode == VK_RETURN) {
             if (isKeyDown) {
                 // Enter commits raw preedit
@@ -226,6 +272,9 @@ bool InputHook::handleKey(DWORD vkCode, bool isKeyDown, bool isKeyUp) {
                 m_engine->clear();
                 sendUnicodeString(raw);
                 if (m_candWin) {
+                    if (m_candWin->isExpanded()) {
+                        m_candWin->toggleExpanded();
+                    }
                     m_candWin->hide();
                 }
             }
@@ -247,9 +296,13 @@ bool InputHook::handleKey(DWORD vkCode, bool isKeyDown, bool isKeyUp) {
 
         if (vkCode == VK_ESCAPE) {
             if (isKeyDown) {
-                m_engine->clear();
-                if (m_candWin) {
-                    m_candWin->hide();
+                if (m_candWin && m_candWin->isExpanded()) {
+                    m_candWin->toggleExpanded();
+                } else {
+                    m_engine->clear();
+                    if (m_candWin) {
+                        m_candWin->hide();
+                    }
                 }
             }
             return true;
@@ -282,7 +335,7 @@ bool InputHook::handleKey(DWORD vkCode, bool isKeyDown, bool isKeyUp) {
                 char ch = static_cast<char>('a' + (vkCode - 'A'));
                 m_engine->processChar(ch);
                 if (m_candWin) {
-                    m_candWin->move(getCaretPosition());
+                    m_candWin->moveToPosition(getCaretPosition());
                     m_candWin->show();
                 }
             }

@@ -33,19 +33,21 @@ bool RimeEngine::initialize(const QString& dllPath,
         if (m_lib.load() && initRimeApi()) {
             QString actualShared = sharedDir;
             if (actualShared.isEmpty()) {
-                if (QFileInfo::exists(appDir + QStringLiteral("/data"))) {
+                QString sysShared = QStringLiteral("C:/Program Files/Rime/weasel-0.17.4/data");
+                if (QFileInfo::exists(sysShared)) {
+                    actualShared = sysShared;
+                } else if (QFileInfo::exists(appDir + QStringLiteral("/data"))) {
                     actualShared = appDir + QStringLiteral("/data");
-                } else {
-                    actualShared = QStringLiteral("C:/Program Files/Rime/weasel-0.17.4/data");
                 }
             }
 
             QString actualUser = userDir;
             if (actualUser.isEmpty()) {
-                if (QFileInfo::exists(appDir + QStringLiteral("/user_dicts"))) {
+                QString sysUser = QStringLiteral("C:/Users/zheng/AppData/Roaming/Rime");
+                if (QFileInfo::exists(sysUser)) {
+                    actualUser = sysUser;
+                } else if (QFileInfo::exists(appDir + QStringLiteral("/user_dicts"))) {
                     actualUser = appDir + QStringLiteral("/user_dicts");
-                } else {
-                    actualUser = QStringLiteral("C:/Users/zheng/AppData/Roaming/Rime");
                 }
             }
 

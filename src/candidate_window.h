@@ -26,6 +26,7 @@ public:
     void setPreviewState(const RimeUiState& state);
     QImage renderPreviewImage(qreal dpr = 1.0);
     QSize calculatedSize() const { return m_calculatedSize; }
+    void moveToPosition(const QPoint& pt);
 
     void toggleEmojiPicker();
     void showCustomEmojiPicker();
