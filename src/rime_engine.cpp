@@ -373,6 +373,7 @@ void RimeEngine::setAsciiMode(bool ascii) {
         clear();
     }
     updateState();
+    emit modeChanged(ascii);
 }
 
 void RimeEngine::setFullShape(bool full) {

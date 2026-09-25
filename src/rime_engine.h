@@ -75,6 +75,7 @@ public:
 signals:
     void stateChanged(const RimeUiState& state);
     void committed(const QString& text);
+    void modeChanged(bool isAsciiMode);
 
 private:
     bool initRimeApi();

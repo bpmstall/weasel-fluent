@@ -517,18 +517,32 @@ void CandidateWindow::updateUiState(const RimeUiState& state) {
 }
 
 void CandidateWindow::moveToPosition(const QPoint& pt) {
-    QScreen* screen = QGuiApplication::screenAt(pt);
-    if (!screen) screen = QGuiApplication::primaryScreen();
+    QScreen* screen = QGuiApplication::primaryScreen();
+    qreal dpr = screen ? screen->devicePixelRatio() : 1.0;
+    if (dpr <= 0.0) dpr = 1.0;
+
+    int logicalX = qRound(pt.x() / dpr);
+    int logicalY = qRound(pt.y() / dpr);
+
+    QScreen* targetScreen = QGuiApplication::screenAt(QPoint(logicalX, logicalY));
+    if (targetScreen && targetScreen != screen) {
+        screen = targetScreen;
+        dpr = screen->devicePixelRatio();
+        if (dpr <= 0.0) dpr = 1.0;
+        logicalX = qRound(pt.x() / dpr);
+        logicalY = qRound(pt.y() / dpr);
+    }
+
     QRect avail = screen ? screen->availableGeometry() : QRect(0, 0, 1920, 1080);
 
-    int x = pt.x();
-    int y = pt.y();
+    int x = logicalX;
+    int y = logicalY;
     int w = m_calculatedSize.width() > 0 ? m_calculatedSize.width() : width();
     int h = m_calculatedSize.height() > 0 ? m_calculatedSize.height() : height();
 
     // If candidate window overflows bottom of screen, flip to above the caret
     if (y + h > avail.bottom() - 4) {
-        y = pt.y() - h - 28;
+        y = logicalY - h - qRound(28 / dpr);
     }
 
     // Clamp coordinates to screen boundaries with padding

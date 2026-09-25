@@ -86,4 +86,38 @@ target("weasel-fluent-cpp-qt")
         if os.isfile(targetfile) and os.isdir("build/Release") then
             os.cp(targetfile, "build/Release/weasel-fluent-cpp-qt.exe")
         end
+        if os.isfile(targetfile) and os.isdir("dist/weasel-fluent") then
+            local dst = "dist/weasel-fluent/weasel-fluent-cpp-qt.exe"
+            local old = "dist/weasel-fluent/weasel-fluent-cpp-qt.exe.old"
+            os.tryrm(old)
+            os.trymv(dst, old)
+            os.trycp(targetfile, dst)
+        end
     end)
+
+-- Target: weasel-fluent-tsf (Windows TSF COM TIP DLL)
+target("weasel-fluent-tsf")
+    set_kind("shared")
+    set_languages("cxx17")
+    add_defines("UNICODE", "_UNICODE", "WEASEL_TSF_EXPORTS")
+    if is_plat("windows") then
+        add_cxflags("/utf-8", "/FS", "/MP", {tools = {"cl", "clang_cl"}})
+        add_syslinks("User32", "Gdi32", "Advapi32", "Ole32", "OleAut32", "Dwmapi")
+    end
+    add_files("tsf/*.cpp")
+    add_files("tsf/weasel_tsf.def")
+
+    after_build(function (target)
+        local targetfile = target:targetfile()
+        if os.isfile(targetfile) and os.isdir("build/Release") then
+            os.trycp(targetfile, "build/Release/weasel-fluent-tsf.dll")
+        end
+        if os.isfile(targetfile) and os.isdir("dist/weasel-fluent") then
+            local dst = "dist/weasel-fluent/weasel-fluent-tsf.dll"
+            local old = "dist/weasel-fluent/weasel-fluent-tsf.dll.old"
+            os.tryrm(old)
+            os.trymv(dst, old)
+            os.trycp(targetfile, dst)
+        end
+    end)
+

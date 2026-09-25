@@ -29,6 +29,7 @@
 #include "emoji_picker_window.h"
 #include "extension_panel_window.h"
 #include "input_hook.h"
+#include "ipc_server.h"
 #include <QSystemTrayIcon>
 #include <QMenu>
 #include <QAction>
@@ -674,6 +675,10 @@ int main(int argc, char* argv[]) {
                                    QStringLiteral("mode"));
     parser.addOption(themeOption);
 
+    QCommandLineOption hookOption(QStringList() << "hook",
+                                  QStringLiteral("Enable legacy global WH_KEYBOARD_LL hook mode (default is pure TSF IPC)"));
+    parser.addOption(hookOption);
+
     parser.process(app);
 
     if (parser.isSet(themeOption)) {
@@ -870,15 +875,23 @@ int main(int argc, char* argv[]) {
         return app.exec();
     }
 
-    // Live Service Mode: Install global keyboard hook and run with system tray icon
-    InputHook& hook = InputHook::instance();
-    hook.setEngine(&engine);
-    hook.setCandidateWindow(&candWin);
-    bool hookOk = hook.install();
-    if (hookOk) {
-        std::cout << "[SERVICE] Rime-Fluent Global Input Hook active. Ready for typing across all Windows apps.\n";
-    } else {
-        std::cerr << "[WARNING] Failed to install global keyboard hook.\n";
+    // 1. Native TSF IPC Server (High-precision caret tracking and system IME pipeline)
+    IpcServer ipcServer(&engine, &candWin);
+    bool ipcOk = ipcServer.start();
+    if (ipcOk) {
+        std::cout << "[SERVICE] Weasel-Fluent TSF Native IPC Server active (Named Pipe: " << "\\\\.\\pipe\\WeaselFluentNamedPipe" << ").\n";
+    }
+
+    // 2. Global Keyboard Hook as optional fallback (only if --hook passed)
+    if (parser.isSet(hookOption)) {
+        InputHook& hook = InputHook::instance();
+        hook.setEngine(&engine);
+        hook.setCandidateWindow(&candWin);
+        if (hook.install()) {
+            std::cout << "[SERVICE] Rime-Fluent Global Input Hook active.\n";
+        } else {
+            std::cerr << "[WARNING] Failed to install global keyboard hook.\n";
+        }
     }
 
     // Create tray icon
@@ -903,8 +916,8 @@ int main(int argc, char* argv[]) {
 
     QSystemTrayIcon tray(createTrayIcon(true), &app);
     QMenu trayMenu;
-    QAction* actMode = trayMenu.addAction(QStringLiteral("中/英模式切换 (Shift)"), [&hook]() {
-        hook.toggleChineseMode();
+    QAction* actMode = trayMenu.addAction(QStringLiteral("中/英模式切换 (Shift)"), [&engine]() {
+        engine.setAsciiMode(!engine.isAsciiMode());
     });
     trayMenu.addSeparator();
     trayMenu.addAction(QStringLiteral("重新部署 (Deploy)"), [&engine]() {
@@ -923,7 +936,8 @@ int main(int argc, char* argv[]) {
     tray.setToolTip(QStringLiteral("Weasel Fluent IME (小狼毫 Fluent 前端) - 中文模式"));
     tray.show();
 
-    QObject::connect(&hook, &InputHook::chineseModeChanged, [&](bool isChinese) {
+    QObject::connect(&engine, &RimeEngine::modeChanged, [&](bool isAscii) {
+        bool isChinese = !isAscii;
         tray.setIcon(createTrayIcon(isChinese));
         tray.setToolTip(isChinese ? QStringLiteral("Weasel Fluent IME - 中文模式")
                                   : QStringLiteral("Weasel Fluent IME - 英文模式"));
