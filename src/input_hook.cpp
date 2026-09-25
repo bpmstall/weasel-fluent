@@ -138,6 +138,9 @@ QPoint InputHook::getCaretPosition() {
 LRESULT CALLBACK InputHook::lowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (nCode == HC_ACTION && s_instance) {
         auto* kbd = reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
+        if (kbd->flags & LLKHF_INJECTED) {
+            return ::CallNextHookEx(nullptr, nCode, wParam, lParam);
+        }
         bool isKeyDown = (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN);
         bool isKeyUp = (wParam == WM_KEYUP || wParam == WM_SYSKEYUP);
 
