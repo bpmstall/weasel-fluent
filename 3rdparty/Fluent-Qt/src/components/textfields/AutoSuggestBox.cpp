@@ -1,0 +1,960 @@
+#include "AutoSuggestBox.h"
+
+#include <QAbstractItemView>
+#include <QEvent>
+#include <QFocusEvent>
+#include <QFontMetrics>
+#include <QFrame>
+#include <QItemSelectionModel>
+#include <QKeyEvent>
+#include <QMoveEvent>
+#include <QPaintEvent>
+#include <QPainter>
+#include <QPainterPath>
+#include <QRegion>
+#include <QResizeEvent>
+#include <QStringListModel>
+#include <QStyle>
+#include <QStyleOptionViewItem>
+
+#include <QStyledItemDelegate>
+
+#include <functional>
+#include <utility>
+
+#include "compatibility/TextPaintCompat.h"
+#include "components/basicinput/Button.h"
+#include "components/collections/ListView.h"
+#include "components/dialogs_flyouts/Flyout.h"
+#include "components/foundation/private/DpiPaintMetrics_p.h"
+#include "components/textfields/private/AutoSuggestBoxAccessibility_p.h"
+#include "design/Spacing.h"
+#include "design/Typography.h"
+
+namespace fluent::textfields {
+
+namespace {
+bool isEditableKey(QKeyEvent* event)
+{
+    if (!event)
+        return false;
+    const int key = event->key();
+    if (key == Qt::Key_Backspace || key == Qt::Key_Delete)
+        return true;
+    if (event->modifiers() & (Qt::ControlModifier | Qt::MetaModifier | Qt::AltModifier))
+        return false;
+    return !event->text().isEmpty() && event->text().at(0).isPrint();
+}
+
+int normalizedPositiveSize(int size)
+{
+    return qMax(1, size);
+}
+} // namespace
+
+class AutoSuggestItemDelegate : public QStyledItemDelegate {
+public:
+    explicit AutoSuggestItemDelegate(const FluentElement* themeHost, QObject* parent = nullptr)
+        : QStyledItemDelegate(parent), m_themeHost(themeHost)
+    {}
+
+    QSize sizeHint(const QStyleOptionViewItem&, const QModelIndex&) const override
+    {
+        return QSize(0, m_itemHeight);
+    }
+
+    void setFontRole(Typography::FontRole role)
+    {
+        if (m_fontRole == role)
+            return;
+        m_fontRole = role;
+    }
+
+    void setItemHeight(int height) { m_itemHeight = normalizedPositiveSize(height); }
+
+    void paint(QPainter* painter, const QStyleOptionViewItem& option,
+               const QModelIndex& index) const override
+    {
+        if (!index.isValid())
+            return;
+
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing);
+
+        const auto& colors = m_themeHost->themeColorsRef();
+        const bool selected = option.state & QStyle::State_Selected;
+        const bool hovered = option.state & QStyle::State_MouseOver;
+        const bool enabled = option.state & QStyle::State_Enabled;
+
+        const QRectF bgRect = QRectF(option.rect).adjusted(2, 3, -2, -3);
+        QColor bgColor = Qt::transparent;
+        QColor textColor = enabled ? colors.textPrimary : colors.textDisabled;
+        if (enabled && selected)
+            bgColor = colors.subtleTertiary;
+        else if (enabled && hovered)
+            bgColor = colors.subtleSecondary;
+
+        if (bgColor.alpha() > 0) {
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(bgColor);
+            painter->drawRoundedRect(bgRect, m_themeHost->themeRadius().control,
+                                     m_themeHost->themeRadius().control);
+        }
+
+        painter->setFont(m_themeHost->themeFont(m_fontRole).toQFont());
+        painter->setPen(textColor);
+
+        const QRectF textSlot = QRectF(option.rect).adjusted(12, 0, -8, 0);
+        const QString display = index.data(Qt::DisplayRole).toString();
+        const QFontMetricsF metrics(painter->font());
+        const QString elidedText =
+            metrics.elidedText(display, Qt::ElideRight, qRound(textSlot.width()));
+        const QRectF textRect =
+            fluent::painting::verticallyCenteredTextInkRect(textSlot, metrics, elidedText);
+        painter->drawText(textRect, Qt::AlignLeft | Qt::AlignVCenter, elidedText);
+
+        painter->restore();
+    }
+
+private:
+    const FluentElement* m_themeHost = nullptr;
+    Typography::FontRole m_fontRole = Typography::FontRole::Body;
+    int m_itemHeight = ::Spacing::ControlHeight::Large;
+};
+
+class SuggestionListPopup : public fluent::dialogs_flyouts::Flyout {
+public:
+    using SuggestionClickedHandler = std::function<void(int)>;
+
+    explicit SuggestionListPopup(AutoSuggestBox* owner) : Flyout(owner), m_owner(owner)
+    {
+        setObjectName("AutoSuggestBoxSuggestionPopup");
+        setAnimationEnabled(false);
+        setPlacement(fluent::dialogs_flyouts::Flyout::Auto);
+        setAnchorOffset(::Spacing::XSmall);
+        setModal(false);
+        setDim(false);
+        setClosePolicy(ClosePolicy(CloseOnPressOutside | CloseOnEscape));
+        setFocusOnOpenEnabled(false);
+
+        m_model = new QStringListModel(this);
+        m_listView = new fluent::collections::ListView(this);
+        m_listView->setObjectName("AutoSuggestBoxSuggestionList");
+        m_listView->setModel(m_model);
+        m_itemDelegate = new AutoSuggestItemDelegate(this, m_listView);
+        m_listView->setItemDelegate(m_itemDelegate);
+        m_listView->setBorderVisible(false);
+        m_listView->setBackgroundVisible(false);
+        // Flyout paints the opaque rounded suggestion surface. Preserve it
+        // when ListView is hosted by a composited Mica window; the collection
+        // viewport's normal transparent clear would otherwise erase the
+        // parent card and expose a rectangular patch of the window backdrop.
+        // zh_CN: Flyout 已绘制不透明圆角建议面。位于合成式 Mica 窗口时必须保留
+        // 该父级表面，否则集合 viewport 的透明清理会擦掉卡片并露出矩形窗口材质。
+        m_listView->setProperty("fluentPreserveParentSurface", true);
+        if (m_listView->viewport())
+            m_listView->viewport()->setProperty("fluentPreserveParentSurface", true);
+        m_listView->setScrollChainingEnabled(false);
+        m_listView->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        m_listView->setSelectionMode(fluent::collections::ListView::SelectionMode::Single);
+        m_listView->setSelectionBehavior(QAbstractItemView::SelectRows);
+        m_listView->setMouseTracking(true);
+        m_listView->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+        m_listView->setStyleSheet(
+            "QListView { background: transparent; border: none; outline: none; }"
+            "QListView::item { background: transparent; }");
+        m_listView->viewport()->setAutoFillBackground(false);
+
+        connect(m_listView, &fluent::collections::ListView::itemClicked, this, [this](int row) {
+            if (row >= 0 && row < m_model->rowCount() && m_suggestionClickedHandler) {
+                m_suggestionClickedHandler(row);
+            }
+        });
+    }
+
+    void setSuggestionClickedHandler(SuggestionClickedHandler handler)
+    {
+        m_suggestionClickedHandler = std::move(handler);
+    }
+
+    void setSuggestions(const QStringList& suggestions)
+    {
+        m_model->setStringList(suggestions);
+        m_listView->scrollToTop();
+        m_listView->doItemsLayout();
+        if (m_listView->viewport())
+            m_listView->viewport()->update();
+    }
+
+    void setSuggestionMetrics(Typography::FontRole fontRole, int itemHeight)
+    {
+        m_itemHeight = normalizedPositiveSize(itemHeight);
+        if (m_itemDelegate) {
+            m_itemDelegate->setFontRole(fontRole);
+            m_itemDelegate->setItemHeight(m_itemHeight);
+        }
+        if (m_listView) {
+            if (m_listView->viewport())
+                m_listView->viewport()->update();
+            m_listView->refreshFluentScrollChrome();
+        }
+        if (isOpen())
+            showForOwner();
+    }
+
+    int currentRow() const
+    {
+        const QModelIndex current = m_listView->currentIndex();
+        return current.isValid() ? current.row() : -1;
+    }
+
+    void setCurrentRow(int row)
+    {
+        if (row < 0 || row >= m_model->rowCount()) {
+            m_listView->clearSelection();
+            m_listView->setCurrentIndex(QModelIndex());
+            return;
+        }
+
+        const QModelIndex index = m_model->index(row, 0);
+        m_listView->setCurrentIndex(index);
+        if (m_listView->selectionModel()) {
+            m_listView->selectionModel()->select(index, QItemSelectionModel::ClearAndSelect |
+                                                            QItemSelectionModel::Rows);
+        }
+        m_listView->scrollTo(index, QAbstractItemView::EnsureVisible);
+    }
+
+    void showForOwner()
+    {
+        if (!m_owner || m_model->rowCount() == 0) {
+            clearMask();
+            close();
+            return;
+        }
+
+        const int shadow = ::Spacing::Standard;
+        const int visibleRows = qMin(m_model->rowCount(), 6);
+        const int listPadY = 2;
+        const int listHeight = visibleRows * m_itemHeight + listPadY * 2;
+        const int contentWidth = qMax(m_owner->width(), 120);
+
+        resize(contentWidth + shadow * 2, listHeight + shadow * 2);
+        m_listView->setGeometry(shadow, shadow + listPadY, contentWidth, listHeight - listPadY * 2);
+        m_listView->doItemsLayout();
+        if (m_listView->viewport())
+            m_listView->viewport()->update();
+        m_listView->refreshFluentScrollChrome();
+        setAnchor(m_owner);
+
+        if (isOpen()) {
+            move(computePosition());
+            raise();
+        } else {
+            showAt(m_owner);
+        }
+        updateOwnerPassthroughMask();
+    }
+
+    void onThemeUpdated() override
+    {
+        Flyout::onThemeUpdated();
+        update();
+        if (m_listView && m_listView->viewport())
+            m_listView->viewport()->update();
+    }
+
+private:
+    void updateOwnerPassthroughMask()
+    {
+        if (!m_owner) {
+            clearMask();
+            return;
+        }
+
+        QRegion hitRegion(rect());
+        const QRect ownerRect(mapFromGlobal(m_owner->mapToGlobal(QPoint(0, 0))), m_owner->size());
+        hitRegion -= QRegion(ownerRect.adjusted(-1, -1, 1, 1));
+        setMask(hitRegion);
+    }
+
+    AutoSuggestBox* m_owner = nullptr;
+    fluent::collections::ListView* m_listView = nullptr;
+    AutoSuggestItemDelegate* m_itemDelegate = nullptr;
+    QStringListModel* m_model = nullptr;
+    SuggestionClickedHandler m_suggestionClickedHandler;
+    int m_itemHeight = ::Spacing::ControlHeight::Large;
+};
+
+AutoSuggestBox::AutoSuggestBox(QWidget* parent) : LineEdit(parent)
+{
+    detail::ensureAutoSuggestBoxAccessibilityFactory();
+    setAttribute(Qt::WA_Hover);
+    setClearButtonEnabled(false);
+    setFrameVisible(false);
+    m_inputHeight = kDefaultInputHeight;
+    setFixedHeight(totalPreferredHeight());
+
+    initializeButtons();
+    ensureSuggestionPopup();
+
+    connect(this, &QLineEdit::textEdited, this, [this](const QString& editedText) {
+        m_nextChangeReason = TextChangeReason::UserInput;
+        m_userTypedText = editedText;
+    });
+    connect(this, &QLineEdit::textChanged, this, &AutoSuggestBox::handleTextChanged);
+
+    updateHeaderTextMargins();
+    updateTextMargins();
+    updateButtonState();
+}
+
+AutoSuggestBox::~AutoSuggestBox()
+{
+    delete m_suggestionPopup.data();
+    m_suggestionPopup = nullptr;
+}
+
+bool AutoSuggestBox::isSuggestionListOpen() const
+{
+    return m_suggestionPopup && m_suggestionPopup->isOpen();
+}
+
+void AutoSuggestBox::setHeader(const QString& header)
+{
+    if (m_header == header)
+        return;
+    m_header = header;
+    setFixedHeight(totalPreferredHeight());
+    updateHeaderTextMargins();
+    updateButtonGeometry();
+    updateGeometry();
+    update();
+    if (isSuggestionListOpen())
+        m_suggestionPopup->showForOwner();
+    detail::notifyAutoSuggestNameChanged(this);
+    emit headerChanged();
+}
+
+void AutoSuggestBox::setQueryIconGlyph(const QString& glyph)
+{
+    if (m_queryIconGlyph == glyph)
+        return;
+    m_queryIconGlyph = glyph;
+    if (m_queryButton) {
+        m_queryButton->setIconGlyph(m_queryIconGlyph, Typography::IconSize::Standard,
+                                    Typography::FontFamily::FluentIcons);
+    }
+    emit queryIconGlyphChanged();
+}
+
+void AutoSuggestBox::setQueryIconVisible(bool visible)
+{
+    if (m_queryIconVisible == visible)
+        return;
+    m_queryIconVisible = visible;
+    updateButtonState();
+    updateTextMargins();
+    updateButtonGeometry();
+    emit queryIconVisibleChanged();
+}
+
+void AutoSuggestBox::setQueryButtonPlacement(QueryButtonPlacement placement)
+{
+    if (m_queryButtonPlacement == placement)
+        return;
+
+    m_queryButtonPlacement = placement;
+    updateButtonGeometry();
+    updateTextMargins();
+    update();
+    emit queryButtonPlacementChanged();
+}
+
+void AutoSuggestBox::setInputHeight(int height)
+{
+    const int normalized = normalizedPositiveSize(height);
+    if (m_inputHeight == normalized)
+        return;
+
+    m_inputHeight = normalized;
+    setFixedHeight(totalPreferredHeight());
+    updateHeaderTextMargins();
+    updateTextMargins();
+    updateButtonGeometry();
+    updateGeometry();
+    update();
+    if (isSuggestionListOpen())
+        m_suggestionPopup->showForOwner();
+    emit inputHeightChanged();
+}
+
+void AutoSuggestBox::setQueryButtonSize(int size)
+{
+    const int normalized = normalizedPositiveSize(size);
+    if (m_queryButtonSize == normalized)
+        return;
+
+    m_queryButtonSize = normalized;
+    updateButtonGeometry();
+    updateTextMargins();
+    update();
+    emit queryButtonSizeChanged();
+}
+
+void AutoSuggestBox::setClearButtonSize(int size)
+{
+    const int normalized = normalizedPositiveSize(size);
+    if (m_clearButtonSize == normalized)
+        return;
+
+    m_clearButtonSize = normalized;
+    updateButtonGeometry();
+    updateTextMargins();
+    update();
+    emit clearButtonSizeChanged();
+}
+
+void AutoSuggestBox::setSuggestionFontRole(Typography::FontRole role)
+{
+    if (m_suggestionFontRole == role)
+        return;
+
+    m_suggestionFontRole = role;
+    updateSuggestionMetrics();
+    emit suggestionFontRoleChanged();
+}
+
+void AutoSuggestBox::setSuggestionItemHeight(int height)
+{
+    const int normalized = normalizedPositiveSize(height);
+    if (m_suggestionItemHeight == normalized)
+        return;
+
+    m_suggestionItemHeight = normalized;
+    updateSuggestionMetrics();
+    emit suggestionItemHeightChanged();
+}
+
+QSize AutoSuggestBox::sizeHint() const
+{
+    QSize hint = LineEdit::sizeHint();
+    hint.setHeight(totalPreferredHeight());
+    hint.setWidth(qMax(hint.width(), 160));
+    return hint;
+}
+
+QSize AutoSuggestBox::minimumSizeHint() const
+{
+    QSize hint = sizeHint();
+    hint.setWidth(qMax(hint.width(), 120));
+    return hint;
+}
+
+void AutoSuggestBox::onThemeUpdated()
+{
+    LineEdit::onThemeUpdated();
+    if (m_queryButton)
+        m_queryButton->onThemeUpdated();
+    if (m_clearButton)
+        m_clearButton->onThemeUpdated();
+    if (m_suggestionPopup)
+        m_suggestionPopup->onThemeUpdated();
+    update();
+}
+
+void AutoSuggestBox::setSuggestions(const QStringList& suggestions)
+{
+    if (m_suggestions == suggestions)
+        return;
+    m_suggestions = suggestions;
+    if (m_suggestionPopup)
+        m_suggestionPopup->setSuggestions(m_suggestions);
+    detail::notifyAutoSuggestSuggestionsChanged(this);
+    emit suggestionsChanged();
+
+    if (m_suggestions.isEmpty()) {
+        closeSuggestionList();
+    } else if ((hasFocus() || isSuggestionListOpen()) && !text().isEmpty()) {
+        openSuggestionList();
+    }
+}
+
+void AutoSuggestBox::clearSuggestions()
+{
+    setSuggestions(QStringList{});
+}
+
+void AutoSuggestBox::paintEvent(QPaintEvent* event)
+{
+    {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        if (!m_header.isEmpty())
+            paintHeader(painter);
+        paintInputFrame(painter);
+    }
+    LineEdit::paintEvent(event);
+}
+
+void AutoSuggestBox::resizeEvent(QResizeEvent* event)
+{
+    LineEdit::resizeEvent(event);
+    updateButtonGeometry();
+    if (isSuggestionListOpen())
+        m_suggestionPopup->showForOwner();
+}
+
+void AutoSuggestBox::keyPressEvent(QKeyEvent* event)
+{
+    if (!event)
+        return;
+
+    if (isEnabled() && !m_suggestions.isEmpty() &&
+        (event->key() == Qt::Key_F4 ||
+         (event->key() == Qt::Key_Down && event->modifiers().testFlag(Qt::AltModifier)))) {
+        openSuggestionList();
+        event->accept();
+        return;
+    }
+
+    switch (event->key()) {
+    case Qt::Key_Down:
+        if (!m_suggestions.isEmpty()) {
+            if (!isSuggestionListOpen())
+                openSuggestionList();
+            const int nextRow =
+                qMin(m_suggestionPopup->currentRow() + 1, m_suggestions.count() - 1);
+            previewSuggestion(nextRow);
+            event->accept();
+            return;
+        }
+        break;
+    case Qt::Key_Up:
+        if (isSuggestionListOpen()) {
+            const int current = m_suggestionPopup->currentRow();
+            if (current > 0) {
+                previewSuggestion(current - 1);
+            } else {
+                setPopupCurrentRow(-1);
+                setTextWithReason(m_userTypedText, TextChangeReason::ProgrammaticChange);
+            }
+            event->accept();
+            return;
+        }
+        break;
+    case Qt::Key_Return:
+    case Qt::Key_Enter:
+        if (isSuggestionListOpen() && m_suggestionPopup->currentRow() >= 0) {
+            chooseSuggestion(m_suggestionPopup->currentRow());
+        } else {
+            QPointer<AutoSuggestBox> guard(this);
+            closeSuggestionList();
+            if (guard)
+                emit guard->querySubmitted(guard->text(), QVariant{});
+        }
+        event->accept();
+        return;
+    case Qt::Key_Escape:
+        if (isSuggestionListOpen()) {
+            closeSuggestionList();
+            event->accept();
+            return;
+        }
+        break;
+    default:
+        break;
+    }
+
+    if (isEditableKey(event) && !isReadOnly())
+        m_nextChangeReason = TextChangeReason::UserInput;
+    LineEdit::keyPressEvent(event);
+}
+
+void AutoSuggestBox::focusInEvent(QFocusEvent* event)
+{
+    m_focused = true;
+    LineEdit::focusInEvent(event);
+    update();
+}
+
+void AutoSuggestBox::focusOutEvent(QFocusEvent* event)
+{
+    m_focused = false;
+    LineEdit::focusOutEvent(event);
+    update();
+}
+
+void AutoSuggestBox::moveEvent(QMoveEvent* event)
+{
+    LineEdit::moveEvent(event);
+    if (isSuggestionListOpen())
+        m_suggestionPopup->showForOwner();
+}
+
+void AutoSuggestBox::enterEvent(FluentEnterEvent* event)
+{
+    m_hovered = true;
+    LineEdit::enterEvent(event);
+    update();
+}
+
+void AutoSuggestBox::leaveEvent(QEvent* event)
+{
+    m_hovered = false;
+    LineEdit::leaveEvent(event);
+    update();
+}
+
+void AutoSuggestBox::changeEvent(QEvent* event)
+{
+    LineEdit::changeEvent(event);
+    if (!event)
+        return;
+
+    if (event->type() == QEvent::EnabledChange || event->type() == QEvent::ReadOnlyChange) {
+        updateButtonState();
+        updateTextMargins();
+        update();
+    } else if (event->type() == QEvent::FontChange) {
+        updateTextMargins();
+    }
+}
+
+QRect AutoSuggestBox::inputRect() const
+{
+    return QRect(0, inputTop(), width(), m_inputHeight);
+}
+
+int AutoSuggestBox::inputTop() const
+{
+    return m_header.isEmpty() ? 0 : kHeaderHeight + kHeaderGap;
+}
+
+int AutoSuggestBox::totalPreferredHeight() const
+{
+    return inputTop() + m_inputHeight;
+}
+
+int AutoSuggestBox::inputTextVerticalPadding() const
+{
+    const QFont inputFont = themeFont(fontRole()).toQFont();
+    const int textHeight = QFontMetrics(inputFont).height();
+    const int centeredPadding = qMax(0, (m_inputHeight - textHeight) / 2);
+    return qMin(::Spacing::Padding::TextFieldVertical, centeredPadding);
+}
+
+void AutoSuggestBox::initializeButtons()
+{
+    m_queryButton = new ::fluent::basicinput::Button(this);
+    m_queryButton->setObjectName("AutoSuggestBoxQueryButton");
+    m_queryButton->setFluentStyle(::fluent::basicinput::Button::Subtle);
+    m_queryButton->setFluentLayout(::fluent::basicinput::Button::IconOnly);
+    m_queryButton->setFluentSize(::fluent::basicinput::Button::Small);
+    m_queryButton->setFocusPolicy(Qt::NoFocus);
+    m_queryButton->setAccessibleName(tr("Submit query"));
+    m_queryButton->setFixedSize(m_queryButtonSize, m_queryButtonSize);
+    m_queryButton->setIconGlyph(m_queryIconGlyph, Typography::IconSize::Standard,
+                                Typography::FontFamily::FluentIcons);
+
+    connect(m_queryButton, &::fluent::basicinput::Button::clicked, this, [this]() {
+        QPointer<AutoSuggestBox> guard(this);
+        closeSuggestionList();
+        if (guard)
+            emit guard->querySubmitted(guard->text(), QVariant{});
+    });
+
+    m_clearButton = new ::fluent::basicinput::Button(this);
+    m_clearButton->setObjectName("AutoSuggestBoxClearButton");
+    m_clearButton->setFluentStyle(::fluent::basicinput::Button::Subtle);
+    m_clearButton->setFluentLayout(::fluent::basicinput::Button::IconOnly);
+    m_clearButton->setFluentSize(::fluent::basicinput::Button::Small);
+    m_clearButton->setFocusPolicy(Qt::NoFocus);
+    m_clearButton->setAccessibleName(tr("Clear text"));
+    m_clearButton->setFixedSize(m_clearButtonSize, m_clearButtonSize);
+    m_clearButton->setIconGlyph(Typography::Icons::Cancel, Typography::IconSize::Standard,
+                                Typography::FontFamily::FluentIcons);
+
+    connect(m_clearButton, &::fluent::basicinput::Button::clicked, this, [this]() {
+        QPointer<AutoSuggestBox> guard(this);
+        setTextWithReason(QString(), TextChangeReason::UserInput);
+        if (!guard)
+            return;
+        guard->closeSuggestionList();
+        if (guard)
+            guard->setFocus();
+    });
+
+    updateButtonGeometry();
+}
+
+void AutoSuggestBox::updateButtonGeometry()
+{
+    const QRect input = inputRect();
+
+    if (m_queryButton) {
+        m_queryButton->setFixedSize(m_queryButtonSize, m_queryButtonSize);
+        const int y = input.top() + (input.height() - m_queryButtonSize) / 2;
+        const int x = m_queryButtonPlacement == QueryButtonPlacement::Left
+                          ? input.left() + kButtonEdgeMargin
+                          : input.right() + 1 - kButtonEdgeMargin - m_queryButtonSize;
+        m_queryButton->setGeometry(x, y, m_queryButtonSize, m_queryButtonSize);
+    }
+
+    if (m_clearButton) {
+        const bool queryVisible = m_queryIconVisible;
+        m_clearButton->setFixedSize(m_clearButtonSize, m_clearButtonSize);
+        const int y = input.top() + (input.height() - m_clearButtonSize) / 2;
+        const int right =
+            queryVisible && m_queryButtonPlacement == QueryButtonPlacement::Right && m_queryButton
+                ? m_queryButton->geometry().left() - 1
+                : input.right() + 1 - kButtonEdgeMargin;
+        const int x = right - m_clearButtonSize;
+        m_clearButton->setGeometry(x, y, m_clearButtonSize, m_clearButtonSize);
+    }
+}
+
+void AutoSuggestBox::updateButtonState()
+{
+    if (m_queryButton) {
+        m_queryButton->setVisible(m_queryIconVisible);
+        m_queryButton->setEnabled(isEnabled());
+    }
+    if (m_clearButton) {
+        const bool visible = !text().isEmpty() && isEnabled() && !isReadOnly();
+        m_clearButton->setVisible(visible);
+        m_clearButton->setEnabled(isEnabled() && !isReadOnly());
+    }
+    updateButtonGeometry();
+}
+
+void AutoSuggestBox::updateTextMargins()
+{
+    int leftMargin = ::Spacing::Padding::TextFieldHorizontal;
+    int rightMargin = ::Spacing::Padding::TextFieldHorizontal;
+    const bool clearVisible = !text().isEmpty() && isEnabled() && !isReadOnly();
+
+    if (m_queryIconVisible) {
+        const int queryReserve = kButtonEdgeMargin + m_queryButtonSize + kTextButtonGap;
+        if (m_queryButtonPlacement == QueryButtonPlacement::Left) {
+            leftMargin = qMax(leftMargin, queryReserve);
+        } else {
+            rightMargin += queryReserve;
+        }
+    }
+
+    if (clearVisible) {
+        rightMargin += m_clearButtonSize + kTextButtonGap;
+        if (!m_queryIconVisible || m_queryButtonPlacement == QueryButtonPlacement::Left)
+            rightMargin += kButtonEdgeMargin;
+    }
+
+    QMargins margins = contentMargins();
+    const int verticalPadding = inputTextVerticalPadding();
+    margins.setLeft(leftMargin);
+    margins.setRight(rightMargin);
+    margins.setTop(verticalPadding);
+    margins.setBottom(verticalPadding);
+    setContentMargins(margins);
+}
+
+void AutoSuggestBox::updateHeaderTextMargins()
+{
+    setTextMargins(0, inputTop(), 0, 0);
+}
+
+void AutoSuggestBox::updateSuggestionMetrics()
+{
+    if (m_suggestionPopup) {
+        m_suggestionPopup->setSuggestionMetrics(m_suggestionFontRole, m_suggestionItemHeight);
+    }
+}
+
+void AutoSuggestBox::ensureSuggestionPopup()
+{
+    if (m_suggestionPopup)
+        return;
+
+    auto* popup = new SuggestionListPopup(this);
+    m_suggestionPopup = popup;
+    updateSuggestionMetrics();
+    popup->setSuggestionClickedHandler([this](int row) { chooseSuggestion(row); });
+    connect(popup, &fluent::dialogs_flyouts::Popup::opened, this, [this]() {
+        detail::notifyAutoSuggestPopupChanged(this);
+        emit suggestionListOpenChanged(true);
+    });
+    connect(popup, &fluent::dialogs_flyouts::Popup::closed, this, [this]() {
+        detail::notifyAutoSuggestPopupChanged(this);
+        emit suggestionListOpenChanged(false);
+    });
+}
+
+void AutoSuggestBox::handleTextChanged(const QString& changedText)
+{
+    const TextChangeReason reason = m_nextChangeReason;
+    m_nextChangeReason = TextChangeReason::ProgrammaticChange;
+
+    if (reason == TextChangeReason::UserInput)
+        m_userTypedText = changedText;
+
+    updateButtonState();
+    updateTextMargins();
+    QPointer<AutoSuggestBox> guard(this);
+    emit textChangedWithReason(changedText, reason);
+    if (!guard)
+        return;
+
+    if (reason == TextChangeReason::UserInput) {
+        if (changedText.isEmpty() || m_suggestions.isEmpty())
+            closeSuggestionList();
+        else if (hasFocus())
+            openSuggestionList();
+    }
+}
+
+void AutoSuggestBox::openSuggestionList()
+{
+    if (m_suggestions.isEmpty())
+        return;
+    ensureSuggestionPopup();
+    if (!m_suggestionPopup)
+        return;
+    m_suggestionPopup->setSuggestions(m_suggestions);
+    m_suggestionPopup->showForOwner();
+}
+
+void AutoSuggestBox::closeSuggestionList()
+{
+    if (!m_suggestionPopup || !m_suggestionPopup->isOpen())
+        return;
+    m_suggestionPopup->close();
+}
+
+void AutoSuggestBox::previewSuggestion(int row)
+{
+    if (row < 0 || row >= m_suggestions.count())
+        return;
+    setPopupCurrentRow(row);
+    const QVariant item(m_suggestions.at(row));
+    const QString value = m_suggestions.at(row);
+    QPointer<AutoSuggestBox> guard(this);
+    emit suggestionChosen(item);
+    if (guard)
+        guard->setTextWithReason(value, TextChangeReason::ProgrammaticChange);
+}
+
+void AutoSuggestBox::chooseSuggestion(int row)
+{
+    if (row < 0 || row >= m_suggestions.count())
+        return;
+    setPopupCurrentRow(row);
+    const QString value = m_suggestions.at(row);
+    const QVariant item(value);
+    QPointer<AutoSuggestBox> guard(this);
+    setTextWithReason(value, TextChangeReason::SuggestionChosen, true);
+    if (!guard)
+        return;
+    emit suggestionChosen(item);
+    if (!guard)
+        return;
+    guard->closeSuggestionList();
+    if (!guard)
+        return;
+    emit querySubmitted(value, item);
+}
+
+void AutoSuggestBox::setPopupCurrentRow(int row)
+{
+    if (!m_suggestionPopup)
+        return;
+    const int before = m_suggestionPopup->currentRow();
+    m_suggestionPopup->setCurrentRow(row);
+    if (before != m_suggestionPopup->currentRow())
+        detail::notifyAutoSuggestActiveDescendantChanged(this);
+}
+
+void AutoSuggestBox::setTextWithReason(const QString& value, TextChangeReason reason,
+                                       bool emitWhenUnchanged)
+{
+    if (text() == value) {
+        m_nextChangeReason = TextChangeReason::ProgrammaticChange;
+        if (emitWhenUnchanged) {
+            updateButtonState();
+            updateTextMargins();
+            emit textChangedWithReason(value, reason);
+        }
+        return;
+    }
+
+    m_nextChangeReason = reason;
+    setText(value);
+}
+
+void AutoSuggestBox::paintInputFrame(QPainter& painter)
+{
+    const auto& colors = themeColorsRef();
+    const fluent::painting::DpiPaintMetrics paintMetrics(painter);
+    const auto frameStroke = paintMetrics.alignedStroke(QRectF(inputRect()), 1.0);
+    const QRectF frameRect = frameStroke.rect;
+
+    QColor bgColor;
+    QColor borderColor;
+    QColor bottomColor;
+    int bottomWidth = ::Spacing::Border::Normal;
+
+    if (!isEnabled()) {
+        bgColor = colors.controlDisabled;
+        borderColor = colors.strokeDivider;
+        bottomColor = borderColor;
+    } else if (isReadOnly()) {
+        bgColor = colors.controlAltSecondary;
+        borderColor = colors.strokeDefault;
+        bottomColor = colors.strokeDivider;
+    } else if (m_focused) {
+        bgColor = effectiveThemeUsesDarkAppearance() ? colors.bgSolid : colors.controlDefault;
+        borderColor = colors.strokeSecondary;
+        bottomColor = colors.accentDefault;
+        bottomWidth = ::Spacing::Border::Focused;
+    } else if (m_hovered) {
+        bgColor = colors.controlSecondary;
+        borderColor = colors.strokeSecondary;
+        bottomColor = colors.strokeSecondary;
+    } else {
+        bgColor = colors.controlDefault;
+        borderColor = colors.strokeDefault;
+        bottomColor = colors.strokeDivider;
+    }
+
+    const qreal radius = themeRadius().control;
+    QPainterPath framePath;
+    framePath.addRoundedRect(frameRect, radius, radius);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(bgColor);
+    painter.drawPath(framePath);
+    painter.setBrush(Qt::NoBrush);
+    painter.setPen(QPen(borderColor, frameStroke.width));
+    painter.drawPath(framePath);
+
+    if (isEnabled() && !isReadOnly()) {
+        const auto bottomStroke = paintMetrics.alignedStroke(QRectF(inputRect()), bottomWidth);
+        QPen bottomPen(bottomColor, bottomStroke.width);
+        bottomPen.setCapStyle(Qt::RoundCap);
+        painter.setPen(bottomPen);
+        const qreal bottomY = bottomStroke.rect.bottom();
+        QPainterPath bottomPath;
+        bottomPath.moveTo(frameRect.left() + radius, bottomY);
+        bottomPath.lineTo(frameRect.right() - radius, bottomY);
+        painter.drawPath(bottomPath);
+    }
+}
+
+void AutoSuggestBox::paintHeader(QPainter& painter)
+{
+    const auto& colors = themeColorsRef();
+    painter.setPen(colors.textPrimary);
+    painter.setFont(themeFont(Typography::FontRole::Body).toQFont());
+    const QRect headerRect(0, 0, width(), kHeaderHeight);
+    painter.drawText(headerRect, Qt::AlignLeft | Qt::AlignVCenter, m_header);
+}
+
+} // namespace fluent::textfields

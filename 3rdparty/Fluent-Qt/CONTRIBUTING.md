@@ -1,0 +1,92 @@
+# Contributing to FluentQt
+
+> **Status:** Current guide
+
+<!-- docs-nav:top:start -->
+[Documentation](docs/README.md) › [Community](docs/community/README.md) › Participation and policy
+
+[Contents](docs/SUMMARY.md) · [Community index](docs/community/README.md) · [Support →](SUPPORT.md)
+<!-- docs-nav:top:end -->
+
+Bug reports, focused fixes, documentation improvements, and component proposals
+are welcome. Small, reproducible changes are easier to review and validate
+across C++, PySide6, and WebAssembly.
+
+By participating, you agree to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
+For installation and usage help, follow the routing in [SUPPORT.md](SUPPORT.md)
+instead of opening a support Issue.
+
+## Before opening an issue
+
+- Search existing issues and confirm the behavior on a supported Qt version.
+- Include the FluentQt version or commit, affected surface (C++, PySide6,
+  WebAssembly, packaging, or docs), Qt/Python version, OS, architecture, and
+  install route.
+- Reduce bugs to the smallest reproducible project or Gallery route. Attach
+  logs and screenshots when they clarify behavior; remove credentials,
+  customer data, and private paths first.
+- Describe the user outcome for feature requests. A component name without a
+  concrete workflow is not enough to define a reusable API.
+
+Use the repository's structured bug or feature form when it fits. Blank issues
+remain available for focused documentation, packaging, and design discussions.
+
+## Making a change
+
+1. Read the [development workflow index](docs/development/README.md) and the
+   closest architecture or component contract.
+2. Keep one pull request focused. Preserve source compatibility unless a
+   dedicated breaking migration has been accepted.
+3. Define public state, ownership, signals, no-op behavior, accessibility, and
+   tests before adding or renaming a public API.
+4. Keep collection data, models, delegates, navigation, and business copy
+   application-owned. Do not add a persistent widget per item to style a view.
+5. Record whether a new public C++ surface is supported by PySide6 in the same
+   release or intentionally C++-only. Do not leave accidental binding gaps.
+6. When a visible component changes, update its source-aligned Gallery example,
+   generated catalogs through their generators, and focused visual evidence.
+
+Use Angular-style Conventional Commit subjects such as `feat(collections): ...`
+or `fix(windowing): ...`; see [release governance](docs/development/release-governance.md).
+
+## Validate the smallest relevant surface
+
+Enable the repository's read-only local gates once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+The hooks run whitespace checks and the same changed-file C++ formatting
+contract used by CI before commits and pushes. See the
+[local static gate](docs/development/testing-workflow.md#local-static-gate) for
+manual check, fix, formatter-version, and fork-base commands.
+
+Complete the [local build setup](docs/development/build-workflow.md#first-use-setup),
+then build the owning test target with the adaptive wrapper. On macOS arm64:
+
+```bash
+cmake --preset vcpkg-osx
+python3 tools/dev/fluent_qt_build.py --preset vcpkg-osx --target test_NAME
+ctest --preset vcpkg-osx -L '^test_NAME$' --output-on-failure
+```
+
+Use the equivalent Windows or Linux preset from the README. Automated tests
+skip interactive VisualCheck cases; follow the
+[testing and visual review workflow](docs/development/testing-workflow.md) for
+manual or snapshot runs. Changes that affect bindings or browser builds should
+also follow the [PySide6](bindings/pyside6/README.md) or
+[WebAssembly](docs/development/webassembly-workflow.md) workflow.
+
+Before requesting review, run `git diff --check` and the
+[local static gate](docs/development/testing-workflow.md#local-static-gate) for
+C++ changes. Public header and site changes also require the generated-output
+checks in that guide. Describe what you tested and any platform or surface you
+could not verify. Pull requests use fast CI; pushes to `main` and scheduled runs use
+full CI. See the [CI workflow](docs/development/ci-workflow.md) for path filters
+and manual validation. Contributors do not need every toolchain on one machine.
+
+<!-- docs-nav:bottom:start -->
+---
+[Contents](docs/SUMMARY.md) · [Community index](docs/community/README.md) · [Support →](SUPPORT.md)
+<!-- docs-nav:bottom:end -->

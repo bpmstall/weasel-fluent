@@ -1,0 +1,400 @@
+#include "GallerySettings.h"
+
+#include <QApplication>
+#include <QCoreApplication>
+#include <QEvent>
+#include <QPalette>
+#include <QSettings>
+#include <QTimer>
+
+#include "compatibility/QtCompat.h"
+#include "components/foundation/FluentElement.h"
+#include "components/foundation/ThemeRegistry.h"
+#include "platform/GalleryPlatform.h"
+#include "support/logging/Log.h"
+#include "viewmodel/GalleryUserTheme.h"
+
+namespace fluent::gallery {
+namespace {
+
+constexpr char kThemeModeKey[] = "settings/themeMode";
+constexpr char kMotionModeKey[] = "settings/motionMode";
+constexpr char kNavigationStyleKey[] = "settings/navigationStyle";
+constexpr char kWindowEffectKey[] = "settings/windowEffect";
+constexpr char kCloseBehaviorKey[] = "settings/closeBehavior";
+constexpr char kCloseBehaviorConfirmedKey[] = "settings/closeBehaviorConfirmed";
+constexpr char kWindowNormalGeometryKey[] = "window/normalGeometry";
+constexpr char kWindowScreenNameKey[] = "window/screenName";
+constexpr char kWindowMaximizedKey[] = "window/maximized";
+constexpr char kIntroCompletedKey[] = "intro/completed";
+constexpr char kLastHomeParticleEffectKey[] = "home/lastParticleEffect";
+constexpr char kHomeParticlesEnabledKey[] = "home/particlesEnabled";
+
+using BackdropEffect = fluent::windowing::BackdropEffect;
+
+// The persisted setting predates the UILib backdrop API. Keep its integer wire format stable so
+// existing config.ini files continue to select Normal/Mica/Acrylic respectively.
+// zh_CN: 该持久化设置早于 UILib 背景 API；固定整数编码，确保现有 config.ini 仍分别选择 Normal/Mica/Acrylic。
+static_assert(static_cast<int>(BackdropEffect::Solid) == 0, "Solid setting must remain 0");
+static_assert(static_cast<int>(BackdropEffect::Mica) == 1, "Mica setting must remain 1");
+static_assert(static_cast<int>(BackdropEffect::Acrylic) == 2, "Acrylic setting must remain 2");
+static_assert(static_cast<int>(GallerySettings::ThemeMode::System) == 0,
+              "System theme setting must remain 0");
+static_assert(static_cast<int>(GallerySettings::ThemeMode::Light) == 1,
+              "Light theme setting must remain 1");
+static_assert(static_cast<int>(GallerySettings::ThemeMode::Dark) == 2,
+              "Dark theme setting must remain 2");
+static_assert(static_cast<int>(GallerySettings::ThemeMode::HighContrast) == 3,
+              "High contrast theme setting must remain 3");
+static_assert(static_cast<int>(GallerySettings::MotionMode::Full) == 0,
+              "Full motion setting must remain 0");
+static_assert(static_cast<int>(GallerySettings::MotionMode::Reduced) == 1,
+              "Reduced motion setting must remain 1");
+static_assert(static_cast<int>(GallerySettings::MotionMode::Disabled) == 2,
+              "Disabled motion setting must remain 2");
+
+fluent::FluentElement::Theme systemTheme()
+{
+    const FluentSystemColorScheme scheme = fluentSystemColorScheme();
+    if (scheme == FluentSystemColorScheme::Dark)
+        return fluent::FluentElement::Dark;
+    if (scheme == FluentSystemColorScheme::Light)
+        return fluent::FluentElement::Light;
+
+#ifdef Q_OS_WIN
+    const QSettings registry(
+        QStringLiteral(
+            "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
+        QSettings::NativeFormat);
+    if (registry.contains(QStringLiteral("AppsUseLightTheme"))) {
+        return registry.value(QStringLiteral("AppsUseLightTheme"), 1).toInt() == 0
+                   ? fluent::FluentElement::Dark
+                   : fluent::FluentElement::Light;
+    }
+#endif
+    if (qApp) {
+        const QPalette palette = qApp->palette();
+        if (palette.color(QPalette::Window).lightness() <
+            palette.color(QPalette::WindowText).lightness()) {
+            return fluent::FluentElement::Dark;
+        }
+    }
+    return fluent::FluentElement::Light;
+}
+
+GallerySettings::ThemeMode hostThemeMode(platform::HostTheme theme)
+{
+    if (theme == platform::HostTheme::HighContrast)
+        return GallerySettings::ThemeMode::HighContrast;
+    if (theme == platform::HostTheme::Dark)
+        return GallerySettings::ThemeMode::Dark;
+    if (theme == platform::HostTheme::Light)
+        return GallerySettings::ThemeMode::Light;
+    return GallerySettings::ThemeMode::System;
+}
+
+} // namespace
+
+GallerySettings& GallerySettings::instance()
+{
+    static auto* settings = new GallerySettings(qApp);
+    return *settings;
+}
+
+GallerySettings::GallerySettings(QObject* parent) : QObject(parent)
+{
+    load();
+    fluent::MotionPolicy::instance().setMode(m_motionMode);
+    if (platform::capabilities().hostControlsTheme) {
+        const ThemeMode initialHostMode = hostThemeMode(platform::hostTheme());
+        if (initialHostMode != ThemeMode::System)
+            m_themeMode = initialHostMode;
+        platform::setHostThemeChangedHandler(
+            this, [this](platform::HostTheme theme) { applyHostThemeMode(hostThemeMode(theme)); });
+    }
+    // Install Fluent token overrides before any widget paints so the first
+    // frame already uses the complete supported visual contract.
+    // zh_CN: 在任何控件绘制前安装 Fluent token 覆盖，确保首帧即为完整受支持视觉契约。
+    GalleryUserTheme::apply();
+    if (qApp)
+        qApp->installEventFilter(this);
+    auto* systemThemePoll = new QTimer(this);
+    systemThemePoll->setInterval(1000);
+    connect(systemThemePoll, &QTimer::timeout, this, [this]() {
+        if (m_themeMode == ThemeMode::System)
+            applyThemeMode();
+    });
+    systemThemePoll->start();
+    fluentConnectSystemColorSchemeChanged(this, [this]() {
+        if (m_themeMode == ThemeMode::System)
+            applyThemeMode();
+    });
+    applyThemeMode();
+}
+
+void GallerySettings::setHomeParticlesEnabled(bool enabled)
+{
+    if (m_homeParticlesEnabled == enabled)
+        return;
+    m_homeParticlesEnabled = enabled;
+    if (platform::persistenceAvailable()) {
+        auto settings = platform::createSettings();
+        settings.setValue(QString::fromLatin1(kHomeParticlesEnabledKey), enabled);
+        settings.sync();
+    }
+    emit homeParticlesEnabledChanged(enabled);
+}
+
+void GallerySettings::setLastHomeParticleEffect(const QString& effect)
+{
+    if (m_lastHomeParticleEffect == effect)
+        return;
+    m_lastHomeParticleEffect = effect;
+    if (platform::persistenceAvailable()) {
+        auto settings = platform::createSettings();
+        settings.setValue(QString::fromLatin1(kLastHomeParticleEffectKey), effect);
+        // Save at selection time so even a quick restart sees the current choice.
+        settings.sync();
+    }
+}
+
+void GallerySettings::setMotionMode(MotionMode mode)
+{
+    switch (mode) {
+    case MotionMode::Full:
+    case MotionMode::Reduced:
+    case MotionMode::Disabled:
+        break;
+    default:
+        return;
+    }
+    if (m_motionMode == mode)
+        return;
+
+    m_motionMode = mode;
+    if (platform::persistenceAvailable()) {
+        platform::createSettings().setValue(QString::fromLatin1(kMotionModeKey),
+                                            static_cast<int>(mode));
+    }
+    fluent::MotionPolicy::instance().setMode(mode);
+    emit motionModeChanged(m_motionMode);
+    LOG_INFO(
+        QStringLiteral("GallerySettings motionModeChanged mode=%1").arg(static_cast<int>(mode)));
+}
+
+void GallerySettings::setThemeMode(ThemeMode mode)
+{
+    if (platform::capabilities().hostControlsTheme) {
+        applyHostThemeMode(hostThemeMode(platform::hostTheme()));
+        return;
+    }
+    if (m_themeMode == mode)
+        return;
+
+    m_themeMode = mode;
+    if (platform::persistenceAvailable()) {
+        platform::createSettings().setValue(QString::fromLatin1(kThemeModeKey),
+                                            static_cast<int>(mode));
+    }
+    applyThemeMode();
+    emit themeModeChanged(m_themeMode);
+    LOG_INFO(
+        QStringLiteral("GallerySettings themeModeChanged mode=%1").arg(static_cast<int>(mode)));
+}
+
+void GallerySettings::applyHostThemeMode(ThemeMode mode)
+{
+    if (!platform::capabilities().hostControlsTheme || mode == ThemeMode::System) {
+        return;
+    }
+    if (m_themeMode == mode)
+        return;
+
+    m_themeMode = mode;
+    applyThemeMode();
+    emit themeModeChanged(m_themeMode);
+    LOG_INFO(
+        QStringLiteral("GallerySettings hostThemeChanged mode=%1").arg(static_cast<int>(mode)));
+}
+
+QColor GallerySettings::accentColor() const
+{
+    return fluent::ThemeRegistry::instance()
+        .colors(fluent::FluentElement::currentTheme())
+        .accentDefault;
+}
+
+void GallerySettings::setAccentColor(const QColor& accent)
+{
+    if (!accent.isValid())
+        return;
+    // Persist the override, then install it through one ThemeRegistry snapshot
+    // commit. zh_CN: 持久化 Fluent 强调色覆盖，再通过一次 ThemeRegistry 快照提交完成安装与重绘。
+    GalleryUserTheme::setAccent(accent);
+    GalleryUserTheme::apply();
+    emit accentColorChanged(accentColor());
+    LOG_INFO(QStringLiteral("GallerySettings setAccentColor accent=%1")
+                 .arg(accent.name(QColor::HexArgb)));
+}
+
+void GallerySettings::resetAccentColor()
+{
+    GalleryUserTheme::clearAccent();
+    GalleryUserTheme::apply();
+    emit accentColorChanged(accentColor());
+    LOG_INFO(QStringLiteral("GallerySettings resetAccentColor"));
+}
+
+void GallerySettings::setNavigationStyle(NavigationStyle style)
+{
+    if (m_navigationStyle == style)
+        return;
+
+    m_navigationStyle = style;
+    if (platform::persistenceAvailable()) {
+        platform::createSettings().setValue(QString::fromLatin1(kNavigationStyleKey),
+                                            static_cast<int>(style));
+    }
+    emit navigationStyleChanged(m_navigationStyle);
+    LOG_INFO(QStringLiteral("GallerySettings navigationStyleChanged style=%1")
+                 .arg(static_cast<int>(style)));
+}
+
+void GallerySettings::setWindowEffect(fluent::windowing::BackdropEffect effect)
+{
+    if (m_windowEffect == effect)
+        return;
+
+    m_windowEffect = effect;
+    if (platform::persistenceAvailable()) {
+        platform::createSettings().setValue(QString::fromLatin1(kWindowEffectKey),
+                                            static_cast<int>(effect));
+    }
+    emit windowEffectChanged(m_windowEffect);
+    LOG_INFO(QStringLiteral("GallerySettings windowEffectChanged effect=%1")
+                 .arg(static_cast<int>(effect)));
+}
+
+void GallerySettings::setCloseBehavior(CloseBehavior behavior)
+{
+    if (m_closeBehavior == behavior)
+        return;
+
+    m_closeBehavior = behavior;
+    if (platform::persistenceAvailable()) {
+        platform::createSettings().setValue(QString::fromLatin1(kCloseBehaviorKey),
+                                            static_cast<int>(behavior));
+    }
+    emit closeBehaviorChanged(m_closeBehavior);
+    LOG_INFO(QStringLiteral("GallerySettings closeBehaviorChanged behavior=%1")
+                 .arg(static_cast<int>(behavior)));
+}
+
+void GallerySettings::setWindowPlacement(const QRect& normalGeometry, const QString& screenName,
+                                         bool maximized)
+{
+    if (m_windowNormalGeometry == normalGeometry && m_windowScreenName == screenName &&
+        m_windowMaximized == maximized) {
+        return;
+    }
+
+    m_windowNormalGeometry = normalGeometry;
+    m_windowScreenName = screenName;
+    m_windowMaximized = maximized;
+    if (!platform::capabilities().persistsWindowPlacement)
+        return;
+    if (!platform::persistenceAvailable())
+        return;
+
+    QSettings settings = platform::createSettings();
+    settings.setValue(QString::fromLatin1(kWindowNormalGeometryKey), normalGeometry);
+    settings.setValue(QString::fromLatin1(kWindowScreenNameKey), screenName);
+    settings.setValue(QString::fromLatin1(kWindowMaximizedKey), maximized);
+}
+
+void GallerySettings::setCloseBehaviorConfirmed(bool confirmed)
+{
+    if (m_closeBehaviorConfirmed == confirmed)
+        return;
+
+    m_closeBehaviorConfirmed = confirmed;
+    if (platform::persistenceAvailable()) {
+        QSettings settings = platform::createSettings();
+        settings.setValue(QString::fromLatin1(kCloseBehaviorConfirmedKey), confirmed);
+        if (confirmed) {
+            settings.setValue(QString::fromLatin1(kCloseBehaviorKey),
+                              static_cast<int>(m_closeBehavior));
+        }
+    }
+}
+
+void GallerySettings::setIntroCompleted(bool completed)
+{
+    if (m_introCompleted == completed)
+        return;
+
+    m_introCompleted = completed;
+    if (platform::persistenceAvailable()) {
+        platform::createSettings().setValue(QString::fromLatin1(kIntroCompletedKey), completed);
+    }
+}
+
+bool GallerySettings::eventFilter(QObject* watched, QEvent* event)
+{
+    if (watched == qApp && event && event->type() == QEvent::ApplicationPaletteChange &&
+        m_themeMode == ThemeMode::System) {
+        applyThemeMode();
+    }
+    return QObject::eventFilter(watched, event);
+}
+
+void GallerySettings::applyThemeMode()
+{
+    fluent::FluentElement::Theme theme = systemTheme();
+    if (m_themeMode == ThemeMode::Light)
+        theme = fluent::FluentElement::Light;
+    else if (m_themeMode == ThemeMode::Dark)
+        theme = fluent::FluentElement::Dark;
+    else if (m_themeMode == ThemeMode::HighContrast)
+        theme = fluent::FluentElement::HighContrast;
+    fluent::FluentElement::setThemeDeferred(theme);
+}
+
+void GallerySettings::load()
+{
+    if (!platform::persistenceAvailable())
+        return;
+
+    QSettings settings = platform::createSettings();
+    const int theme = qBound(0, settings.value(QString::fromLatin1(kThemeModeKey), 0).toInt(), 3);
+    const int motion = qBound(0, settings.value(QString::fromLatin1(kMotionModeKey), 0).toInt(), 2);
+    const int navigation =
+        qBound(0, settings.value(QString::fromLatin1(kNavigationStyleKey), 0).toInt(), 4);
+    // Default 1 = Mica, matching m_windowEffect's in-class initializer (the current shipping look).
+    // zh_CN: 默认 1 = Mica，与 m_windowEffect 的类内初值一致（当前出厂观感）。
+    const int windowEffect =
+        qBound(0, settings.value(QString::fromLatin1(kWindowEffectKey), 1).toInt(), 2);
+    const int closeBehavior =
+        qBound(0, settings.value(QString::fromLatin1(kCloseBehaviorKey), 1).toInt(), 2);
+    m_themeMode = static_cast<ThemeMode>(theme);
+    m_motionMode = static_cast<MotionMode>(motion);
+    m_navigationStyle = static_cast<NavigationStyle>(navigation);
+    m_windowEffect = static_cast<BackdropEffect>(windowEffect);
+    m_closeBehavior = static_cast<CloseBehavior>(closeBehavior);
+    if (platform::capabilities().persistsWindowPlacement) {
+        m_windowNormalGeometry =
+            settings.value(QString::fromLatin1(kWindowNormalGeometryKey)).toRect();
+        m_windowScreenName = settings.value(QString::fromLatin1(kWindowScreenNameKey)).toString();
+        m_windowMaximized =
+            settings.value(QString::fromLatin1(kWindowMaximizedKey), false).toBool();
+    }
+    m_closeBehaviorConfirmed =
+        settings.value(QString::fromLatin1(kCloseBehaviorConfirmedKey), false).toBool();
+    m_introCompleted = settings.value(QString::fromLatin1(kIntroCompletedKey), false).toBool();
+    m_lastHomeParticleEffect =
+        settings.value(QString::fromLatin1(kLastHomeParticleEffectKey)).toString();
+    m_homeParticlesEnabled =
+        settings.value(QString::fromLatin1(kHomeParticlesEnabledKey), true).toBool();
+}
+
+} // namespace fluent::gallery

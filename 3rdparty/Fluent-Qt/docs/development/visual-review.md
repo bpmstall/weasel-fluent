@@ -1,0 +1,131 @@
+# Visual Review
+
+> **Status:** Current guide
+
+<!-- docs-nav:top:start -->
+[Documentation](../README.md) › [Development](README.md) › Build, tests, and diagnostics
+
+[← Logging Workflow](logging-workflow.md) · [Contents](../SUMMARY.md) · [Development index](README.md) · [App Visual Geometry Verification →](app-visual-geometry-verification.md)
+<!-- docs-nav:top:end -->
+
+Use this workflow to run Fluent component `VisualCheck` tests for interactive UI
+review after visual, theme, painting, or layout changes.
+
+## When to Use
+
+- Confirming subjective visual polish after geometry-focused tests pass.
+- Validating rendering after `paintEvent()` changes.
+- Checking Light/Dark theme behavior.
+- Reviewing spacing, typography, rounded corners, shadows, and interaction
+  states.
+- Debugging component-specific visual regressions.
+
+For application-level layout correctness issues under `app/` such as centering,
+fixed sizes, edge alignment, spacing, and containment, start with geometry
+assertions or a geometry dump before relying on screenshot interpretation.
+Reusable components under `src/components/` keep their existing component test
+contracts unless a specific component visual bug needs geometry evidence.
+The [App Visual Geometry Verification](app-visual-geometry-verification.md)
+guide owns that workflow and its diagnostic command. Return here for perceived
+balance, color, typography, icon sharpness, material, and animation.
+
+## Find the Test Binary
+
+Default build output uses the `vcpkg-osx` preset:
+
+```bash
+./build/vcpkg-osx/tests/components/<category>/test_<snake_case_name>
+```
+
+Examples:
+
+```bash
+./build/vcpkg-osx/tests/components/basicinput/test_button
+./build/vcpkg-osx/tests/components/basicinput/test_combo_box
+./build/vcpkg-osx/tests/components/collections/test_list_view
+./build/vcpkg-osx/tests/components/collections/test_tree_view
+./build/vcpkg-osx/tests/components/dialogs_flyouts/test_popup
+./build/vcpkg-osx/tests/components/navigation/test_navigation_view
+./build/vcpkg-osx/tests/components/date_time/test_calendar_date_picker
+```
+
+If another preset is used, replace `vcpkg-osx` in the path with that preset name.
+
+## Build Before Review
+
+Build the focused test target when known:
+
+```bash
+cmake --build --preset vcpkg-osx --target test_<name>
+```
+
+Build the full preset only when broad dependencies changed:
+
+```bash
+cmake --build --preset vcpkg-osx
+```
+
+## Run VisualCheck
+
+Run only VisualCheck tests. The window closes when the reviewer closes it.
+
+```bash
+./build/vcpkg-osx/tests/components/<category>/test_<name> --gtest_filter="*VisualCheck*"
+```
+
+Do not set `SKIP_VISUAL_TEST` for manual review. Automated CTest runs set
+`SKIP_VISUAL_TEST=1` to skip interactive cases.
+
+The checked-in
+[visual evidence inventory](visual-evidence-inventory.json) registers the
+review surface for each high-risk component. A registered `VisualCheck` or
+Gallery route means only that a reviewer has somewhere reproducible to inspect;
+it never means the surface was opened, reviewed, or accepted. Nonstandard
+interactive test names must be listed in `FLUENT_QT_MANUAL_VISUAL_TESTS` so
+they cannot leak into unattended CI lanes.
+
+Automated inventory records distinguish `ci` from `registered-only` execution.
+That field is derived from the configured fast/full and contract lanes; it does
+not turn a locally registered test into CI evidence. Both automated and manual
+evidence must resolve to a CMake-registered source, and test macros stay on one
+line so the current `gtest_add_tests` scanner can discover them. Likewise,
+opening an overlay and verifying its placement are separate states and need
+separate assertions.
+
+For Light/Dark/RTL *regression* against three checked-in PNGs, use the
+opt-in `visual_gate` in [Testing Workflow](testing-workflow.md). That gate is
+not a substitute for this interactive review.
+
+For repeatable AI-assisted review across a declared state matrix, use
+[AI-assisted GUI verification](gui-verification-workflow.md). It combines
+interaction assertions, named geometry, Inspector budgets, same-environment
+pixel evidence, and a different reviewer identity. It still keeps this manual
+VisualCheck path for animation and operating-system interaction risks.
+Using a desktop Qt platform plugin, including `xcb` under Xvfb, is not proof of
+native input, compositor, screen-reader, IME, or window-manager behavior.
+
+## Review Checklist
+
+- Colors match semantic tokens in `ThemeColors.h`.
+- Control-level corners use `CornerRadius::Control`; overlay surfaces use
+  `CornerRadius::Overlay`.
+- Spacing follows the 4 px grid and component-specific layout metrics.
+- Typography uses the project font tokens and stays legible in Light/Dark modes.
+- Rest, hover, pressed, focused, selected, and disabled states are visible and
+  coherent.
+- Text fits its container across the intended window sizes.
+- Animated transitions are readable without interrupting input flow.
+- Overlay components respect [Overlay Behavior](../architecture/overlay-behavior.md).
+
+## After Review
+
+Run the focused automated validation without interactive VisualCheck windows:
+
+```bash
+ctest --preset vcpkg-osx -L '^test_<name>$' --output-on-failure
+```
+
+<!-- docs-nav:bottom:start -->
+---
+[← Logging Workflow](logging-workflow.md) · [Contents](../SUMMARY.md) · [Development index](README.md) · [App Visual Geometry Verification →](app-visual-geometry-verification.md)
+<!-- docs-nav:bottom:end -->

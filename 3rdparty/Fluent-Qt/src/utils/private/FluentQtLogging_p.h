@@ -1,0 +1,17 @@
+#ifndef FLUENTQT_UTILS_PRIVATE_FLUENTQTLOGGING_P_H
+#define FLUENTQT_UTILS_PRIVATE_FLUENTQTLOGGING_P_H
+
+#include <QLoggingCategory>
+
+namespace fluent::logging {
+
+Q_DECLARE_LOGGING_CATEGORY(themeCategory)
+Q_DECLARE_LOGGING_CATEGORY(typographyCategory)
+Q_DECLARE_LOGGING_CATEGORY(windowingCategory)
+Q_DECLARE_LOGGING_CATEGORY(layoutCategory)
+Q_DECLARE_LOGGING_CATEGORY(editingCategory)
+Q_DECLARE_LOGGING_CATEGORY(commandBarCategory)
+
+} // namespace fluent::logging
+
+#endif // FLUENTQT_UTILS_PRIVATE_FLUENTQTLOGGING_P_H

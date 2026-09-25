@@ -1,0 +1,530 @@
+#include "GalleryTitleBarController.h"
+
+#include <utility>
+
+#include <QAbstractAnimation>
+#include <QEvent>
+#include <QGraphicsOpacityEffect>
+#include <QLabel>
+#include <QPoint>
+#include <QPropertyAnimation>
+#include <QTimer>
+#include <QVariantAnimation>
+
+#include "compatibility/QtCompat.h"
+#include "components/basicinput/Button.h"
+#include "components/foundation/QMLPlus.h"
+#include "components/status_info/ToolTip.h"
+#include "components/textfields/AutoSuggestBox.h"
+#include "components/textfields/Label.h"
+#include "components/windowing/TitleBar.h"
+#include "design/Animation.h"
+#include "design/Typography.h"
+#include "AppIcon.h"
+#include "GallerySearchRanking.h"
+#include "GalleryWindowMetrics.h"
+#include "view/support/GalleryMotion.h"
+
+namespace fluent::gallery {
+namespace {
+
+using Edge = fluent::AnchorLayout::Edge;
+using TitleBarMetrics = metrics::TitleBar;
+
+constexpr char kButtonPressAnimationName[] = "galleryTitleBarButtonPressAnimation";
+constexpr qreal kButtonPressScale =
+    0.86; // WinUI-like press depth for icon buttons. zh_CN: 仿 WinUI 的图标按钮按下缩放深度。
+constexpr qreal kInactiveChromeOpacity = 0.55;
+
+int titleBarLeadingOffset(const fluent::windowing::TitleBar* bar)
+{
+    if (!bar)
+        return TitleBarMetrics::HorizontalMargin;
+    return TitleBarMetrics::leadingOffset(bar->systemReservedLeadingWidth());
+}
+
+// WinUI-style click feedback: the glyph quickly dips to ~0.86 scale and springs back, reading as
+// a press without moving the button or disturbing the layout. zh_CN: 仿 WinUI 点击反馈：字形快速缩小再弹回，
+// 呈现按下感，不移动按钮、不影响布局。
+void startButtonPress(fluent::basicinput::Button* button)
+{
+    if (!button || !button->isEnabled())
+        return;
+
+    if (auto* current = button->findChild<QPropertyAnimation*>(
+            QString::fromLatin1(kButtonPressAnimationName))) {
+        current->stop();
+        current->deleteLater();
+    }
+
+    button->setIconScale(1.0);
+    auto* animation = new QPropertyAnimation(button, "iconScale", button);
+    animation->setObjectName(QString::fromLatin1(kButtonPressAnimationName));
+    const auto motion = button->themeAnimation();
+    animation->setDuration(motion.fast);
+    animation->setEasingCurve(motion.decelerate);
+    animation->setStartValue(1.0);
+    animation->setKeyValueAt(0.4, kButtonPressScale);
+    animation->setEndValue(1.0);
+    QObject::connect(animation, &QPropertyAnimation::finished, button,
+                     [button]() { button->setIconScale(1.0); });
+    ::fluent::gallery::motion::startFiniteTransition(animation, motion.fast, true,
+                                                     QAbstractAnimation::DeleteWhenStopped);
+}
+
+} // namespace
+
+GalleryTitleBarController::GalleryTitleBarController(fluent::windowing::TitleBar* bar,
+                                                     const QStringList& searchTitles,
+                                                     Callbacks callbacks, QObject* parent)
+    : QObject(parent), m_bar(bar), m_callbacks(std::move(callbacks))
+{
+    m_windowActive = bar && bar->isWindowActive();
+    build(searchTitles);
+}
+
+GalleryTitleBarController::~GalleryTitleBarController()
+{
+    // The controller watches widgets owned by both the title bar and its host
+    // window. Detach before either hierarchy starts deleting popup children;
+    // otherwise teardown events can re-enter this filter after the title bar
+    // has already gone away.
+    // zh_CN: 控制器同时监听标题栏及其宿主窗口。需在任一控件树开始析构弹出层
+    // 子对象前解除过滤器，避免标题栏销毁后仍由清理事件重入本过滤器。
+    if (m_hostWindow)
+        m_hostWindow->removeEventFilter(this);
+    if (m_bar)
+        m_bar->removeEventFilter(this);
+    if (m_backButton)
+        m_backButton->removeEventFilter(this);
+    if (m_menuButton)
+        m_menuButton->removeEventFilter(this);
+
+    if (m_toolTip) {
+        m_toolTip->hide();
+        delete m_toolTip.data();
+        m_toolTip = nullptr;
+    }
+}
+
+void GalleryTitleBarController::build(const QStringList& searchTitles)
+{
+    auto* bar = m_bar.data();
+    auto* layout = qobject_cast<fluent::AnchorLayout*>(bar->layout());
+    if (!layout)
+        return;
+
+    bar->setTitleBarHeight(TitleBarMetrics::Height);
+
+    m_backButton = new fluent::basicinput::Button(bar);
+    auto* backButton = m_backButton.data();
+    backButton->setObjectName(QStringLiteral("GalleryTitleBar.BackButton"));
+    backButton->setFluentStyle(fluent::basicinput::Button::Subtle);
+    backButton->setFluentLayout(fluent::basicinput::Button::IconOnly);
+    backButton->setFluentSize(fluent::basicinput::Button::Small);
+    backButton->setFont(backButton->themeFont(Typography::FontRole::Caption).toQFont());
+    backButton->setIconGlyph(Typography::Icons::TitleBarBack, TitleBarMetrics::ButtonIconSize);
+    // Height is fixed; the width is driven by the reveal animation (0 when there is no history,
+    // ButtonSize once back navigation is available). zh_CN: 高度固定，宽度由展开动画驱动。
+    backButton->setFixedHeight(TitleBarMetrics::ButtonSize);
+    backButton->setFocusPolicy(Qt::NoFocus);
+    fluent::status_info::ToolTip::attach(backButton, QStringLiteral("Back"));
+    backButton->setEnabled(false);
+    backButton->installEventFilter(this);
+    // Start faded out; the reveal animation drives contentOpacity alongside the width collapse so
+    // showing/hiding reads as a smooth slide-in rather than a hard pop. zh_CN: 初始淡出，展开动画同时驱动透明度与宽度。
+    backButton->setContentOpacity(0.0);
+    connect(backButton, &fluent::basicinput::Button::clicked, this, [this]() {
+        if (m_callbacks.onBack)
+            m_callbacks.onBack();
+    });
+
+    m_menuButton = new fluent::basicinput::Button(bar);
+    auto* menuButton = m_menuButton.data();
+    menuButton->setObjectName(QStringLiteral("GalleryTitleBar.MenuButton"));
+    menuButton->setFluentStyle(fluent::basicinput::Button::Subtle);
+    menuButton->setFluentLayout(fluent::basicinput::Button::IconOnly);
+    menuButton->setFluentSize(fluent::basicinput::Button::Small);
+    menuButton->setIconGlyph(Typography::Icons::GlobalNav, TitleBarMetrics::ButtonIconSize);
+    menuButton->setFixedSize(TitleBarMetrics::ButtonSize, TitleBarMetrics::ButtonSize);
+    menuButton->setFocusPolicy(Qt::NoFocus);
+    fluent::status_info::ToolTip::attach(menuButton, QStringLiteral("Toggle navigation pane"));
+    menuButton->setEnabled(false);
+    menuButton->installEventFilter(this);
+    connect(menuButton, &fluent::basicinput::Button::clicked, this, [this]() {
+        if (m_callbacks.onToggleNav)
+            m_callbacks.onToggleNav();
+    });
+
+    auto* appIcon = new QLabel(bar);
+    m_appIcon = appIcon;
+    appIcon->setObjectName(QStringLiteral("GalleryTitleBar.AppIcon"));
+    appIcon->setAlignment(Qt::AlignCenter);
+    appIcon->setFixedSize(TitleBarMetrics::AppIconSize, TitleBarMetrics::AppIconSize);
+    refreshAppIcon();
+
+    auto* title = new fluent::textfields::Label(QStringLiteral("Fluent-Qt Gallery"), bar);
+    m_title = title;
+    title->setObjectName(QStringLiteral("GalleryTitleBar.Title"));
+    title->setFluentTypography(Typography::FontRole::Caption);
+    title->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    title->setFixedSize(TitleBarMetrics::TitleWidth, TitleBarMetrics::TitleHeight);
+
+    fluent::AnchorLayout::Anchors backAnchors;
+    backAnchors.left = {bar, Edge::Left, titleBarLeadingOffset(bar)};
+    backAnchors.verticalCenter = {bar, Edge::VCenter, 0};
+    layout->addAnchoredWidget(backButton, backAnchors);
+
+    connect(bar, &fluent::windowing::TitleBar::systemReservedLeadingWidthChanged, backButton,
+            [backButton, layout](int newWidth) {
+                backButton->anchors()->left.offset = newWidth > 0
+                                                         ? TitleBarMetrics::leadingOffset(newWidth)
+                                                         : TitleBarMetrics::HorizontalMargin;
+                layout->invalidate();
+            });
+
+    fluent::AnchorLayout::Anchors menuAnchors;
+    menuAnchors.left = {backButton, Edge::Right, TitleBarMetrics::ItemGap};
+    menuAnchors.verticalCenter = {bar, Edge::VCenter, 0};
+    layout->addAnchoredWidget(menuButton, menuAnchors);
+
+    fluent::AnchorLayout::Anchors appIconAnchors;
+    appIconAnchors.left = {menuButton, Edge::Right, TitleBarMetrics::ItemGap};
+    appIconAnchors.verticalCenter = {bar, Edge::VCenter, 0};
+    layout->addAnchoredWidget(appIcon, appIconAnchors);
+
+    fluent::AnchorLayout::Anchors titleAnchors;
+    titleAnchors.left = {appIcon, Edge::Right, TitleBarMetrics::ItemGap};
+    titleAnchors.verticalCenter = {bar, Edge::VCenter, 0};
+    layout->addAnchoredWidget(title, titleAnchors);
+
+    auto* searchBox = new fluent::textfields::AutoSuggestBox(bar);
+    m_searchBox = searchBox;
+    searchBox->setObjectName(QStringLiteral("GalleryTitleBar.SearchBox"));
+    // Click-to-focus only: keep the search box OUT of the tab/auto-focus chain so it never becomes
+    // the focus fallback when an unrelated widget (e.g. a Settings combo) loses focus during a theme
+    // or layout refresh — which made focus jump up to the search box on every settings change.
+    // Clicking it still focuses it for typing. zh_CN: 仅点击聚焦：把搜索框移出 Tab/自动聚焦链，使其不会在无关控件
+    //（如设置页下拉框）于主题/布局刷新中丢焦点时成为回退目标——这正是每次改设置焦点都跳到搜索框的原因。点击它仍可聚焦输入。
+    searchBox->setFocusPolicy(Qt::ClickFocus);
+    searchBox->setPlaceholderText(QStringLiteral("Search components and examples..."));
+    searchBox->setSuggestions(searchTitles);
+    searchBox->setInputHeight(TitleBarMetrics::SearchHeight);
+    searchBox->setQueryButtonSize(TitleBarMetrics::ButtonSize);
+    searchBox->setClearButtonSize(TitleBarMetrics::ButtonSize);
+    // Height is fixed; width is driven by updateLayout() so the box can shrink to fit the free
+    // span between the leading group and the native caption controls. zh_CN: 高度固定，宽度由 updateLayout() 驱动。
+    searchBox->setFixedHeight(TitleBarMetrics::SearchHeight);
+    // AutoSuggestBox leaves filtering to the owner (WinUI semantics): token-AND, prefix-first.
+    // zh_CN: AutoSuggestBox 把过滤交给使用方：词元 AND 匹配、前缀优先。
+    connect(searchBox, &fluent::textfields::AutoSuggestBox::textChangedWithReason, searchBox,
+            [searchBox, searchTitles](const QString& text,
+                                      fluent::textfields::AutoSuggestBox::TextChangeReason reason) {
+                if (reason != fluent::textfields::AutoSuggestBox::TextChangeReason::UserInput)
+                    return;
+                searchBox->setSuggestions(search::rankedTitles(searchTitles, text));
+            });
+    connect(searchBox, &fluent::textfields::AutoSuggestBox::querySubmitted, this,
+            [this](const QString& queryText, const QVariant& chosenSuggestion) {
+                const QString chosen = chosenSuggestion.toString();
+                if (m_callbacks.onSearch)
+                    m_callbacks.onSearch(chosen.isEmpty() ? queryText : chosen);
+            });
+    connect(searchBox, &fluent::textfields::AutoSuggestBox::suggestionChosen, this,
+            [this](const QVariant& item) {
+                if (m_callbacks.onSearch)
+                    m_callbacks.onSearch(item.toString());
+            });
+
+    // The search box is intentionally left out of the AnchorLayout: it needs a max width,
+    // centering-with-clamp, and collapse behaviour the anchor model can't express, so updateLayout()
+    // positions it manually against the live bar width. zh_CN: 搜索框刻意不入 AnchorLayout，由 updateLayout() 手动定位。
+    bar->installEventFilter(this);
+    m_hostWindow = bar->window();
+    if (m_hostWindow && m_hostWindow != bar)
+        m_hostWindow->installEventFilter(this);
+    connect(bar, &fluent::windowing::TitleBar::windowActiveChanged, this, [this](bool active) {
+        m_windowActive = active;
+        hideToolTip();
+        applyChromeOpacity();
+    });
+    // Start fully collapsed: no history at launch. setBackAvailable() animates it open later.
+    // zh_CN: 启动完全收起；之后由 setBackAvailable() 动画展开。
+    applyBackButtonReveal(0.0);
+    updateLayout();
+    applyChromeOpacity();
+}
+
+bool GalleryTitleBarController::eventFilter(QObject* watched, QEvent* event)
+{
+    if (watched == m_backButton || watched == m_menuButton) {
+        auto* button = qobject_cast<fluent::basicinput::Button*>(watched);
+        switch (event->type()) {
+        case QEvent::ToolTip:
+            // Replace Qt's native tooltip with the Fluent ToolTip (reusing Qt's hover delay);
+            // returning true suppresses the platform bubble. zh_CN: 用 Fluent ToolTip 替换原生提示，返回 true 抑制平台气泡。
+            showToolTip(button);
+            return true;
+        case QEvent::Leave:
+        case QEvent::Hide:
+            hideToolTip();
+            break;
+        case QEvent::MouseButtonPress:
+            startButtonPress(button);
+            hideToolTip();
+            break;
+        default:
+            break;
+        }
+    } else if (watched == m_bar && event->type() == QEvent::Resize) {
+        hideToolTip(); // a width change can orphan a bubble that got no Leave event
+        updateLayout();
+    }
+
+    const bool watchesDisplay = m_bar && (watched == m_bar || watched == m_bar->window());
+    if (watchesDisplay && fluentIsDisplayScaleChangeEvent(event)) {
+        hideToolTip();
+        // Event filters run before the receiver handles the event. Refresh on
+        // the next turn so QWidget::devicePixelRatioF() exposes the new screen.
+        // zh_CN: 事件过滤器早于接收者处理事件；延后一轮，确保读取到新屏幕的 DPR。
+        QTimer::singleShot(0, this, [this]() {
+            refreshAppIcon();
+            updateLayout();
+        });
+    }
+
+    return QObject::eventFilter(watched, event);
+}
+
+void GalleryTitleBarController::updateLayout()
+{
+    auto* bar = m_bar.data();
+    if (!bar || !m_searchBox)
+        return;
+
+    const bool minimalNav = m_callbacks.isMinimalNavLayout && m_callbacks.isMinimalNavLayout();
+
+    // In the minimal (hidden-pane) layout the app title+icon give way to the search box; otherwise
+    // they show. Nothing shows while the splash owns the title bar. zh_CN: 最小布局下标题+图标让位给搜索框。
+    const bool showAppIcon = m_chromeVisible;
+    const bool showTitle = m_chromeVisible && !minimalNav;
+    if (m_title)
+        m_title->setVisible(showTitle);
+    if (m_appIcon)
+        m_appIcon->setVisible(showAppIcon);
+
+    // Settle the left-anchored chain (back/menu/icon/title) before publishing hit-test rects.
+    // zh_CN: 发布命中测试区域前，先让左锚链落到最终几何。
+    if (auto* barLayout = bar->layout())
+        barLayout->activate();
+
+    const int leftBound = TitleBarMetrics::searchLeftBound(bar->systemReservedLeadingWidth(),
+                                                           showAppIcon, showTitle, m_backReveal);
+    const int rightBound =
+        TitleBarMetrics::searchRightBound(bar->width(), bar->systemReservedTrailingWidth());
+    const int avail = TitleBarMetrics::searchAvailableWidth(leftBound, rightBound);
+
+    const bool showSearch = m_chromeVisible && TitleBarMetrics::canShowSearch(avail);
+    m_searchBox->setVisible(showSearch);
+    if (showSearch) {
+        const int searchW = TitleBarMetrics::searchWidth(avail);
+        const int x = TitleBarMetrics::searchX(bar->width(), searchW, leftBound, rightBound);
+        const int y = (bar->height() - TitleBarMetrics::SearchHeight) / 2;
+        m_searchBox->setGeometry(x, y, searchW, TitleBarMetrics::SearchHeight);
+    }
+
+    // The search box lives outside the AnchorLayout and title/icon visibility just changed —
+    // republish the native hit-test regions so every control stays click-through.
+    // zh_CN: 搜索框在 AnchorLayout 之外、可见性刚变化，重新发布命中测试区域，保证可点击。
+    bar->refreshChromeExclusions();
+}
+
+void GalleryTitleBarController::setChromeVisible(bool visible, bool animated)
+{
+    // The custom title-bar widgets all share the "GalleryTitleBar." object-name prefix; the native
+    // min/max/close buttons do not, so toggling by prefix leaves them alone. zh_CN: 自定义控件均以
+    // "GalleryTitleBar." 前缀命名，按前缀切换不影响原生窗口按钮。
+    if (!m_bar)
+        return;
+
+    m_chromeVisible = visible;
+    if (m_chromeRevealAnimation)
+        m_chromeRevealAnimation->stop();
+    const QList<QWidget*> chrome = m_bar->findChildren<QWidget*>();
+    for (QWidget* widget : chrome) {
+        if (!widget->objectName().startsWith(QStringLiteral("GalleryTitleBar.")))
+            continue;
+
+        if (!visible) {
+            widget->setGraphicsEffect(nullptr);
+            widget->setVisible(false);
+            continue;
+        }
+
+        widget->setVisible(true);
+    }
+
+    if (!visible) {
+        m_chromeRevealOpacity = 0.0;
+    } else if (!animated) {
+        setChromeRevealOpacity(1.0);
+    } else {
+        // One shared progress value keeps every title-bar element optically synchronized and also
+        // composes cleanly with the active/inactive opacity instead of installing competing fades.
+        // zh_CN: 统一进度值让所有标题栏元素同步淡入，并可与激活/失活透明度稳定叠加。
+        if (!m_chromeRevealAnimation) {
+            m_chromeRevealAnimation = new QVariantAnimation(this);
+            m_chromeRevealAnimation->setObjectName(
+                QStringLiteral("galleryTitleBarChromeRevealAnimation"));
+            connect(m_chromeRevealAnimation, &QVariantAnimation::valueChanged, this,
+                    [this](const QVariant& value) { setChromeRevealOpacity(value.toReal()); });
+        }
+        setChromeRevealOpacity(0.0);
+        m_chromeRevealAnimation->setDuration(::Animation::Duration::Normal);
+        m_chromeRevealAnimation->setEasingCurve(
+            ::Animation::getEasing(::Animation::EasingType::Decelerate));
+        m_chromeRevealAnimation->setStartValue(0.0);
+        m_chromeRevealAnimation->setEndValue(1.0);
+        ::fluent::gallery::motion::startFiniteTransition(m_chromeRevealAnimation,
+                                                         ::Animation::Duration::Normal);
+    }
+
+    // setVisible(true) above un-hides chrome uniformly; re-apply the adaptive rules so the
+    // title/icon and search box land in their width-appropriate state. zh_CN: 重新套用自适应规则。
+    updateLayout();
+}
+
+void GalleryTitleBarController::setMenuEnabled(bool enabled)
+{
+    if (m_menuButton)
+        m_menuButton->setEnabled(enabled);
+}
+
+QWidget* GalleryTitleBarController::searchBox() const
+{
+    return m_searchBox.data();
+}
+
+QWidget* GalleryTitleBarController::appIconWidget() const
+{
+    return m_appIcon.data();
+}
+
+void GalleryTitleBarController::setAppIconRevealed(bool revealed)
+{
+    if (m_appIconRevealed == revealed)
+        return;
+    m_appIconRevealed = revealed;
+    applyChromeOpacity();
+}
+
+void GalleryTitleBarController::applyBackButtonReveal(qreal reveal)
+{
+    m_backReveal = reveal;
+    if (m_backButton) {
+        m_backButton->setFixedWidth(qRound(reveal * TitleBarMetrics::ButtonSize));
+        m_backButton->setContentOpacity(reveal);
+    }
+    if (m_menuButton && m_menuButton->anchors())
+        m_menuButton->anchors()->left.offset = qRound(reveal * TitleBarMetrics::ItemGap);
+    if (auto* barLayout = m_bar ? m_bar->layout() : nullptr)
+        barLayout->invalidate();
+    updateLayout();
+}
+
+void GalleryTitleBarController::refreshAppIcon()
+{
+    if (!m_bar || !m_appIcon)
+        return;
+    m_appIcon->setPixmap(appicon::pixmap(TitleBarMetrics::AppIconSize, m_bar->devicePixelRatioF()));
+}
+
+void GalleryTitleBarController::setChromeRevealOpacity(qreal opacity)
+{
+    m_chromeRevealOpacity = qBound<qreal>(0.0, opacity, 1.0);
+    applyChromeOpacity();
+}
+
+void GalleryTitleBarController::applyChromeOpacity()
+{
+    if (!m_bar || !m_chromeVisible)
+        return;
+
+    const qreal activationOpacity = m_windowActive ? 1.0 : kInactiveChromeOpacity;
+    const qreal opacity = m_chromeRevealOpacity * activationOpacity;
+    const QList<QWidget*> chrome = m_bar->findChildren<QWidget*>();
+    for (QWidget* widget : chrome) {
+        if (!widget->objectName().startsWith(QStringLiteral("GalleryTitleBar.")))
+            continue;
+
+        const qreal widgetOpacity = widget == m_appIcon && !m_appIconRevealed ? 0.0 : opacity;
+        if (qFuzzyCompare(widgetOpacity, 1.0)) {
+            widget->setGraphicsEffect(nullptr);
+            continue;
+        }
+
+        auto* effect = qobject_cast<QGraphicsOpacityEffect*>(widget->graphicsEffect());
+        if (!effect) {
+            effect = new QGraphicsOpacityEffect(widget);
+            widget->setGraphicsEffect(effect);
+        }
+        effect->setOpacity(widgetOpacity);
+    }
+}
+
+void GalleryTitleBarController::setBackAvailable(bool available)
+{
+    if (!m_backButton || m_backRevealed == available)
+        return;
+    m_backRevealed = available;
+    m_backButton->setEnabled(available);
+
+    const auto motion = m_backButton->themeAnimation();
+    if (!m_backRevealAnimation) {
+        m_backRevealAnimation = new QVariantAnimation(this);
+        m_backRevealAnimation->setObjectName(QStringLiteral("galleryTitleBarBackRevealAnimation"));
+        m_backRevealAnimation->setDuration(motion.normal);
+        connect(m_backRevealAnimation, &QVariantAnimation::valueChanged, this,
+                [this](const QVariant& value) { applyBackButtonReveal(value.toReal()); });
+    }
+    m_backRevealAnimation->stop();
+    // Ease out on the way in (decisive arrival), the standard curve on the way out.
+    // zh_CN: 入场用缓出（落点干脆），退场用标准曲线。
+    m_backRevealAnimation->setEasingCurve(available ? motion.decelerate : motion.standard);
+    m_backRevealAnimation->setStartValue(m_backReveal);
+    m_backRevealAnimation->setEndValue(available ? 1.0 : 0.0);
+    ::fluent::gallery::motion::startFiniteTransition(m_backRevealAnimation, motion.normal);
+}
+
+void GalleryTitleBarController::showToolTip(fluent::basicinput::Button* button)
+{
+    if (!button)
+        return;
+    const QString text = button->toolTip();
+    if (text.isEmpty())
+        return;
+
+    if (!m_toolTip) {
+        m_toolTip = new fluent::status_info::ToolTip(nullptr);
+        m_toolTip->setAnimationEnabled(true);
+    }
+    m_toolTip->setText(text); // adjustSize() runs inside
+
+    // Center the bubble under the button. The widget carries a transparent shadow band, so offset
+    // by shadowMargin to land the visible bubble (not the band) at the gap below. zh_CN: 气泡居中于按钮下方。
+    const int shadow = m_toolTip->shadowMargin();
+    const QPoint anchor = button->mapToGlobal(QPoint(button->width() / 2, button->height()));
+    const int x = anchor.x() - m_toolTip->width() / 2;
+    const int y = anchor.y() + TitleBarMetrics::ToolTipGap - shadow;
+    m_toolTip->move(x, y);
+    m_toolTip->show();
+    m_toolTip->raise();
+}
+
+void GalleryTitleBarController::hideToolTip()
+{
+    if (m_toolTip)
+        m_toolTip->hide();
+}
+
+} // namespace fluent::gallery

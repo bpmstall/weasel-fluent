@@ -1,0 +1,99 @@
+#include "ui/shell/MainWindow.h"
+
+#include <FluentQt/FluentQt.h>
+
+#include <QVBoxLayout>
+
+#include "application/WorkspaceController.h"
+#include "ui/components/WorkbenchShell.h"
+#include "ui/pages/WorkspacePage.h"
+#include "ui/theme/BrandTheme.h"
+
+namespace @APP_NAMESPACE@::ui {
+namespace {
+
+QString text(const std::string& value)
+{
+    return QString::fromUtf8(value.data(), static_cast<int>(value.size()));
+}
+
+} // namespace
+
+MainWindow::MainWindow(application::WorkspaceController& controller)
+    : m_controller(controller)
+{
+    setWindowTitle(QStringLiteral("@APP_NAME_CPP@"));
+    setMinimumSize(720, 540);
+    resize(1080, 720);
+
+    auto* shell = new WorkbenchShell;
+
+    auto* navigation = new QWidget(shell);
+    auto* navigationLayout = new QVBoxLayout(navigation);
+    navigationLayout->setContentsMargins(20, 22, 20, 20);
+    navigationLayout->setSpacing(8);
+
+    auto* appName = new fluent::textfields::Label(
+        QStringLiteral("@APP_NAME_CPP@"), navigation);
+    appName->setFluentTypography(Typography::FontRole::Subtitle);
+    appName->setTextElideMode(Qt::ElideRight);
+    navigationLayout->addWidget(appName);
+
+    auto* section = new fluent::textfields::Label(
+        QStringLiteral("Workspace"), navigation);
+    section->setTextColorRole(
+        fluent::textfields::Label::TextColorRole::Secondary);
+    navigationLayout->addWidget(section);
+    navigationLayout->addSpacing(8);
+
+    auto* selected = new fluent::layout::Card(navigation);
+    selected->setAppearance(fluent::layout::Card::Canvas);
+    auto* selectedLayout = new QVBoxLayout(selected);
+    selectedLayout->setContentsMargins(16, 14, 16, 14);
+    selectedLayout->setSpacing(4);
+    m_navigationTitle = new fluent::textfields::Label(selected);
+    m_navigationTitle->setFluentTypography(Typography::FontRole::BodyStrong);
+    selectedLayout->addWidget(m_navigationTitle);
+    m_navigationPath = new fluent::textfields::Label(selected);
+    m_navigationPath->setTextColorRole(
+        fluent::textfields::Label::TextColorRole::Secondary);
+    m_navigationPath->setTextElideMode(Qt::ElideMiddle);
+    selectedLayout->addWidget(m_navigationPath);
+    navigationLayout->addWidget(selected);
+    navigationLayout->addStretch();
+
+    auto* hint = new fluent::textfields::Label(
+        QStringLiteral("FluentQt workbench"), navigation);
+    hint->setFluentTypography(Typography::FontRole::Caption);
+    hint->setTextColorRole(
+        fluent::textfields::Label::TextColorRole::Tertiary);
+    navigationLayout->addWidget(hint);
+
+    m_page = new WorkspacePage(shell);
+    shell->setNavigationWidget(navigation);
+    shell->setPrimaryWidget(m_page);
+    setContentWidget(shell);
+
+    connect(m_page->refreshButton(), &fluent::basicinput::Button::clicked,
+            this, [this] {
+                m_controller.refresh();
+                render(m_controller.state());
+            });
+    connect(m_page->themeButton(), &fluent::basicinput::Button::clicked,
+            this, [this] {
+                m_controller.toggleTheme();
+                theme::applyBrandTheme(m_controller.state().darkTheme);
+                render(m_controller.state());
+            });
+
+    render(m_controller.state());
+}
+
+void MainWindow::render(const application::WorkspaceViewState& state)
+{
+    m_navigationTitle->setText(text(state.title));
+    m_navigationPath->setText(text(state.path));
+    m_page->render(state);
+}
+
+} // namespace @APP_NAMESPACE@::ui

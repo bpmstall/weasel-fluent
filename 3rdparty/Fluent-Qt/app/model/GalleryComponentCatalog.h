@@ -1,0 +1,68 @@
+#ifndef GALLERYCOMPONENTCATALOG_H
+#define GALLERYCOMPONENTCATALOG_H
+
+#include <QString>
+#include <QVector>
+
+namespace fluent::gallery {
+
+struct GalleryComponentEntry {
+    QString id;
+    QString title;
+    QString iconGlyph;
+    QString apiTypeName;
+    QString apiNamespace;
+};
+
+struct GalleryComponentCategory {
+    QString id;
+    QString title;
+    QString sourceDirectory;
+    QString iconGlyph;
+    QVector<GalleryComponentEntry> components;
+};
+
+/**
+ * @brief Public integration facts shown on a component documentation page.
+ * zh_CN: 组件文档页展示的公共集成信息。
+ */
+struct GalleryComponentReference {
+    QString header;
+    QString qualifiedType;
+    QString cmakeTarget;
+    QString pythonInstall;
+    QString pythonImport;
+    QString pythonType;
+
+    bool isValid() const
+    {
+        return !header.isEmpty() && !qualifiedType.isEmpty() && !cmakeTarget.isEmpty();
+    }
+
+    bool hasPythonReference() const
+    {
+        return !pythonInstall.isEmpty()
+            && !pythonImport.isEmpty()
+            && !pythonType.isEmpty();
+    }
+};
+
+const QVector<GalleryComponentCategory>& galleryComponentCatalog();
+
+/** @brief Resolves public integration facts for a component route. */
+GalleryComponentReference galleryComponentReference(const QString& routeId);
+
+/**
+ * @brief Resolves the bundled control-icon resource for a control title.
+ * zh_CN: 按控件标题解析打包的控件图标资源。
+ *
+ * Images live under `:/app/assets/control_images/<category-id>/<Title>.png`; an empty
+ * result tells callers to render the component's catalog glyph instead.
+ * zh_CN: 图片位于 `:/app/assets/control_images/<分类 id>/<标题>.png`；返回空字符串时，
+ * 调用方应改为绘制组件目录中的字形。
+ */
+QString galleryControlImageResource(const QString& controlTitle);
+
+} // namespace fluent::gallery
+
+#endif // GALLERYCOMPONENTCATALOG_H

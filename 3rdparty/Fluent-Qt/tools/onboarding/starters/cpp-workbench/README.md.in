@@ -1,0 +1,39 @@
+# @APP_NAME@
+
+Native FluentQt workbench with a responsive shell, a balanced full-height
+workspace page, and explicit domain, application, infrastructure, and UI
+boundaries.
+
+## Build
+
+Against a FluentQt source checkout:
+
+```bash
+cmake -S . -B build -DFLUENTQT_SOURCE_DIR=/path/to/Fluent-QT
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
+```
+
+Against an installed development package, omit `FLUENTQT_SOURCE_DIR` and add
+its prefix to `CMAKE_PREFIX_PATH`.
+
+The composition root is `src/app/main.cpp`. Workflow state stays in
+`application`, external services belong in `infrastructure`, and FluentQt
+widgets stay in `ui`. Check `.fluentqt/architecture.json` before adding a new
+dependency direction.
+
+`ui/components/WorkbenchShell` owns wide/narrow shell geometry. Replace the
+sample `ui/pages/WorkspacePage` with the product's primary workflow; keep the
+shell's centered width, material gaps, and responsive navigation behavior until
+the approved design direction gives a concrete reason to change them.
+
+## Quality report
+
+After the window builds successfully, emit a read-only Inspector report for
+the rendered widget tree:
+
+```bash
+./build/@APP_TARGET@ --quality-report
+```
+
+The command prints versioned JSON and exits. It does not change the interface.

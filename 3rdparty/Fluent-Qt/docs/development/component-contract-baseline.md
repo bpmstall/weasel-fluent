@@ -1,0 +1,191 @@
+# Component Contract Baseline
+
+> **Status:** Historical Phase 0/1 baseline with a maintained post-baseline addendum
+
+<!-- docs-nav:top:start -->
+[Documentation](../README.md) › [Development](README.md) › Baselines and historical records
+
+[Contents](../SUMMARY.md) · [Development index](README.md) · [Production Evidence Baselines →](production-evidence.md)
+<!-- docs-nav:top:end -->
+
+- Date: 2026-07-24
+- Baseline: `release/1.4.x` at `a429e3d`
+
+## Purpose
+
+This document records the Phase 0 contract baseline and the Phase 1 behavior
+fixes accepted against it. Phase 0 added executable evidence without changing
+component behavior. Phase 1 repaired the confirmed foundation, text-field,
+overlay, elevation, and resource-startup defects and activated their acceptance
+tests without broadening the public API migration scope.
+
+Future known-gap tests may still use `DISABLED_Contract_*` while their desired
+behavior is under implementation. Phase 1 leaves no disabled contract test in
+the current suite.
+
+The Phase 0/1 resolution sections remain the historical `release/1.4.x`
+baseline. The **Full UILib Review Matrix**, the 2026-08-13 addendum, and later
+guardrails are a living post-baseline inventory and may point to current work.
+Cross-component editing and notification work is tracked in the
+[System Capability Roadmap](system-capability-roadmap.md).
+
+## Test Labels
+
+- `contract`: active component acceptance tests.
+- `known_contract_gap`: reserved for disabled target-behavior tests. The Phase 1
+  suite currently has none.
+- `local_full`: active, non-visual tests only.
+- `ci_full`: the curated cross-platform set.
+
+Build and run the active contract baseline:
+
+```bash
+cmake --build --preset vcpkg-linux --target fluent_qt_contract_tests --parallel
+ctest --preset vcpkg-linux -L '^contract$' -LE '^known_contract_gap$' --output-on-failure
+```
+
+Run one acceptance contract explicitly:
+
+```bash
+./build/vcpkg-linux/tests/components/textfields/test_text_edit \
+  --gtest_filter='TextEditTest.Contract_WidthReflowRecomputesVisibleLineHeight'
+```
+
+## Phase 1 Resolutions
+
+| ID | Area | Accepted behavior | Active acceptance test | Status |
+|---|---|---|---|---|
+| `FND-STATE-001` | QMLPlus | Unknown state names do not become current state | `QMLPlusTest.Contract_InvalidStateDoesNotBecomeCurrentState` | Resolved |
+| `FND-STATE-002` | QMLPlus | A transition restores properties absent from the next state | `QMLPlusTest.Contract_StateTransitionRestoresPropertiesAbsentFromNextState` | Resolved |
+| `FND-LIFE-001` | QMLPlus | Destroyed state targets are removed from default-value storage | `QMLPlusTest.Contract_DestroyedStateTargetsAreRemovedFromDefaultStorage` | Resolved |
+| `FND-LAYOUT-001` | AnchorLayout | Spacer and nested-layout items do not cause a null widget dereference | `AnchorLayoutTest.Contract_NonWidgetLayoutItemsDoNotCrashGeometryPass` | Resolved |
+| `FND-LAYOUT-003` | AnchorLayout | Right and bottom edges use exclusive boundary coordinates so offsets equal the visible gap | `AnchorLayoutTest.Contract_RightAndBottomEdgesUseExactVisualBoundaries` | Resolved |
+| `FND-LAYOUT-004` | AnchorLayout | Fill anchors keep direct widget geometry semantics while non-widget items receive layout-item geometry | `AnchorLayoutTest.Contract_FillOverridesWidgetSizePolicy` | Resolved |
+| `FND-OVERLAY-001` | Overlay geometry | An oversized card anchors to the usable origin instead of using inverted clamp bounds | `FoundationContractsTest.Contract_OversizedOverlayCardUsesStableAvailableOrigin` | Resolved |
+| `DSN-ELEV-001` | Elevation | `Elevation::None` has zero offset, blur, spread, and opacity | `FoundationContractsTest.Contract_ElevationNoneHasNoVisibleShadow` | Resolved |
+| `TXT-LABEL-001` | Label | Qt meta-property writes and `Label::text()` report the same full text | `LabelTest.Contract_MetaPropertyTextWriteKeepsFullTextCoherent` | Resolved |
+| `TXT-LABEL-002` | Label | Returning to the default color role removes only component-owned style | `LabelTest.Contract_DefaultTextColorRoleRemovesOwnedColorStyle` | Resolved |
+| `TXT-EDIT-001` | TextEdit | Width-driven word wrapping recomputes visible-line height | `TextEditTest.Contract_WidthReflowRecomputesVisibleLineHeight` | Resolved |
+| `TXT-EDIT-002` | TextEdit | Focusing through `QWidget*` forwards to the inner editor | `TextEditTest.Contract_BaseWidgetFocusForwardsToInnerEditor` | Resolved |
+| `TXT-EDIT-003` | TextEdit | Reapplying current text is a no-op and preserves undo history | `TextEditTest.Contract_ReapplyingCurrentTextPreservesUndoHistory` | Resolved |
+| `TXT-EDIT-004` | TextEdit | Visible-line bounds always satisfy `min <= max` | `TextEditTest.Contract_VisibleLineBoundsRemainOrdered` | Resolved |
+| `RES-INIT-001` | Resources | Pre-application access does not permanently cache an empty resource result or failed font initialization | `ResourceInitializationTest.Contract_PreApplicationAccessDoesNotPoisonResourceInitialization` | Resolved |
+
+## Deferred Foundation Decision
+
+None. `FND-LAYOUT-002` is recorded as Resolved in the 2026-08-13 addendum.
+
+## Addendum 2026-08-13
+
+`FND-LAYOUT-002` is **Resolved**. Item-derived size hints follow the anchored
+item chain; cyclic sibling anchors use a stable fallback and emit a
+Tarjan-based diagnostic once. Implementation is in
+`src/components/foundation/QMLPlus.cpp`.
+
+| ID | Area | Accepted behavior | Active acceptance test | Status |
+|---|---|---|---|---|
+| `FND-LAYOUT-002` | AnchorLayout | Item-derived size hints follow the anchored item chain; cyclic sibling anchors use a stable fallback and emit a Tarjan-based diagnostic once | `AnchorLayoutTest.Contract_SizeHintsComeFromAnchoredItemChain`, `Contract_SizeHintPreservesNaturalSizeBetweenOpposingAnchors`, `Contract_CyclicSiblingAnchorsUseStableFallback` | Resolved |
+
+Post-baseline status: AnchorLayout and overlay lifecycle/property semantics
+were resolved in 1.7. Theme transactions and persistence were not part of this
+baseline; any future public work requires its own scoped contract.
+
+## Addendum 2026-09-03
+
+`TXT-EDIT-005` is **Resolved** for the 1.8 line. A visible, focused `TextEdit`
+interpolates content-driven height changes, retargets an active transition when
+editing continues, and follows the application `MotionPolicy`. Programmatic
+text and metric setters settle synchronously. Layout-driven recomputation does
+not start a new transition and settles on its scheduled layout pass, so callers
+do not acquire an animation timing dependency. IME preedit keeps the current
+height stable until commit, and crossing the scrolling threshold does not
+interrupt the active height transition.
+
+| ID | Area | Accepted behavior | Active acceptance test | Status |
+|---|---|---|---|---|
+| `TXT-EDIT-005` | TextEdit | Focused content edits animate growth and collapse, in-flight edits retarget, IME preedit stays geometrically stable until commit, scrolling-threshold relayout preserves an active transition, Reduced/Disabled modes converge correctly, and programmatic sizing remains synchronous | `TextEditMotionTest.Contract_FocusedEditsAnimateRetargetAndCollapseVisibleLineHeight`, `Contract_ReducedAndDisabledMotionResolveEditedHeight`, `Contract_ProgrammaticHeightChangesRemainSynchronous`, `Contract_ProgrammaticSameTargetUpdateStopsActiveUserTransition`, `Contract_InputMethodPreeditKeepsHeightStableUntilCommit`, `Contract_CrossingVisibleLineLimitKeepsHeightTransitionRunning` | Resolved |
+
+## Active Guardrails Added in Phases 0 and 1
+
+| Area | Guard |
+|---|---|
+| Property binding | An ordinary Qt property is synchronized initially and after its notify signal |
+| State handling | Unknown states are rejected, transitions restore defaults, and destroyed targets are removed safely |
+| AnchorLayout | Basic anchors resolve deterministically, right/bottom offsets equal visible gaps, fill preserves widget geometry, and non-widget layout items receive geometry safely |
+| Overlay geometry | Normal cards clamp inside bounds and oversized cards use a stable usable origin |
+| Elevation | `None` paints no visible shadow in either theme |
+| Label | The derived setter, inherited getter, and derived meta-object writes stay coherent; caller style is preserved |
+| TextEdit | Meta-properties, focus forwarding, wrapping height, line-bound ordering, undo-preserving no-ops, and MotionPolicy-aware focused editing transitions are guarded |
+| Resource startup | Resource catalogs are safe before `QApplication`; font initialization retries after the GUI application exists |
+| CI discovery | Contract and known-gap tests have separate CTest labels |
+| Memory safety | Linux contract tests have an opt-in ASan/UBSan preset and scheduled lane |
+| Compilation coverage | Weekly Linux x64 full validation builds every registered Qt/GTest target |
+
+## Full UILib Review Matrix
+
+The install-header allowlist is the public inventory source. Every category
+below was reviewed against property/signal behavior, inherited Qt APIs,
+ownership, focus/input, locale/RTL/accessibility, DPI/painting, and tests.
+
+| Category | Public surface reviewed | Current disposition |
+|---|---|---|
+| Foundation | FluentElement, QMLPlus, AnchorLayout, ThemeRegistry, UserTheme, overlay helpers | State/lifetime/non-widget layout/oversized overlay defects and `FND-LAYOUT-002` are resolved; theme transactions and persistence remain outside this baseline |
+| Layout | Accordion, Card, Divider, Expander | Reusable token-driven surfaces replace Gallery-local card, separator, and disclosure implementations; Accordion composes Expander with explicit item ownership, single/multiple coordination, and header-key navigation |
+| Basic input | Button, CompoundButton, CheckBox, ColorPicker, ComboBox, DropDownButton, HyperlinkButton, MultiSelectComboBox, RadioButton, RatingControl, RepeatButton, Slider, SplitButton, ToggleButton, ToggleSplitButton, ToggleSwitch | MultiSelectComboBox keeps a separate model/selection-model contract so ComboBox remains source-compatible and single-select; focused contracts cover keyboard, filtering, bulk selection, accessibility, and large models |
+| Collections | DrawerView, FlipView, FlowView, GridView, ListView, SplitView, StackView, TreeView | Phase 4 keeps FlowView large-model painting and hit testing viewport-bounded and uses one shared drag-displacement animation |
+| Date and time | CalendarDatePicker, CalendarView, DatePicker, TimePicker | Locale ownership and atomic range updates were not locked by the 1.4 baseline; current behavior is covered by component tests and compatibility policy |
+| Dialogs and flyouts | CoachMark, ContentDialog, Dialog, Flyout, Popup, TeachingTip | Shared logical-open, lifecycle, close-reason, and no-op notification semantics are resolved by the 1.7 overlay contract |
+| Menus and toolbars | CommandBar, CommandBarFlyout, FluentMenu, FluentMenuItem, MenuBar | Capability Phase 1 completes the shared private text-editing context menu; Capability Phase 2 supplies stable EditingCommandRouter actions; Capability Phase 3 completes public command surfaces, private responsive presenters, same-window overflow/flyout behavior, accessibility, design-language rendering, router reuse, and deletion-safe borrowed-action teardown |
+| Navigation | Breadcrumb, NavigationView, Pivot, SelectorBar, StackContentHost, TabView | NavigationView/StackContentHost page and chrome ownership is explicit; global event filters, RTL, and accessibility remain Phase 2/3 |
+| Scrolling | AnnotatedScrollBar, PipsPager, ScrollBar, ScrollView | Empty-selection policy is intentionally unchanged; inherited API coherence is Phase 2 |
+| Status and info | Avatar, InfoBadge, InfoBar, ProgressBar, ProgressRing, Shimmer, ToolTip, Toast | Avatar adds caller-owned identity/image content and composes InfoBadge for presence; historical Phase 4 removes per-frame ProgressBar animation-token reconstruction; Capability Phase 4 adds InfoBadge value/visibility accessibility plus Toast announcements, borrowed actions, hover pause, dismissal reasons, and keyed in-place updates while preserving managed stacking |
+| Text fields | AutoSuggestBox, EditingCommandRouter, Label, LineEdit, NumberBox, PasswordBox, TextEdit | Historical Phase 1 resolves Label/TextEdit coherence, focus, sizing, and no-op defects; Capability Phase 1 privately shares the Fluent editing menu, Capability Phase 2 adds window-scoped semantic editing actions, and the 1.8 addendum gives focused TextEdit auto-height changes interruptible MotionPolicy-aware transitions |
+| Windowing | TitleBar, Window, backdrop contracts | Current ownership, caption accessibility, and platform lifecycle rules live in the Window Chrome architecture contract |
+| Design | Animation, Breakpoints, CornerRadius, Elevation, IconCatalog, Spacing, ThemeColors, Typography | Fluent is the only visual contract; dynamic tokens avoid color snapshots in paint hot paths and FlowView uses DPI-aligned strokes |
+
+## Phase 5 and 6 Guardrails
+
+| Area | Accepted behavior | Evidence |
+|---|---|---|
+| External consumption | Source subproject, local `FetchContent`, and installed-package consumers compile the same public API | `.github/integration` CI fixture |
+| Public headers | The umbrella entry remains available; category entries provide a smaller supported include surface | `CategoryHeaderProbe.cpp` |
+| Release metadata | CMake, vcpkg, English/Chinese README, and website release tags cannot drift silently | `validate-project-metadata.py` |
+| Gallery boundary | Gallery code cannot include private UILib implementation headers | `validate-gallery-boundary.py` |
+| Component routes | Every component route renders live public-API samples under Dark/RTL/disabled review states without escaping its card | `GalleryAcceptanceMatrixCoversEveryComponentRoute` |
+| Gallery DPI | Representative Gallery composition preserves logical geometry and physical DPR at 125%, 200%, and 300% | `GalleryAcceptanceScaleTest.*` |
+| Visual review | Button pointer/focus/disabled states and TreeView RTL receive deterministic Light/Dark snapshots; the 1.7 pixel gate compares three checked-in PNGs | `ComponentStateMatrixVisualCheck`; `VisualGate.CompareBaselines` |
+
+## Baseline deferrals and later resolutions
+
+Phase 0 deliberately avoided locking implementation accidents into the public
+contract. Later work resolved some of those questions:
+
+| Question at the 1.4 baseline | Later disposition |
+|---|---|
+| Zero-page `PipsPager` index | Not decided by this baseline; follow current component tests and compatibility policy |
+| TextEdit line-count sizing policy | Resolved in 1.8: focused user edits animate and retarget content-driven height, IME preedit stays stable until commit, scrolling-threshold relayout preserves active motion, programmatic text/metric setters settle synchronously, and other layout-driven recomputation starts no new transition |
+| Qt inheritance versus composition for existing controls | No broad migration was approved; changes remain component-specific compatibility decisions |
+| Common open-state semantics | Resolved in 1.7 for Popup, Flyout, Dialog, ContentDialog, and TeachingTip; menu-backed split/dropdown buttons keep their own boundary |
+| Ownership names for externally supplied widgets | `WidgetOwnership` is the reusable public direction for new hosted-widget APIs; existing APIs are not mechanically migrated |
+
+## Exit Criteria for Phases 0 and 1
+
+- The contract aggregate target builds on the current host.
+- Active `contract` tests pass without a desktop session.
+- Every Phase 1 acceptance test is active; the suite contains no
+  `DISABLED_Contract_*` test.
+- At least one Linux scheduled lane compiles every registered test binary.
+- Windows and Linux run the active contract subset successfully.
+- Linux ASan/UBSan runs the active contract subset without changing release
+  builds.
+- The affected Label/TextEdit/QMLPlus/AnchorLayout/resource modules pass their
+  complete non-visual test sets.
+- TextEdit focus, auto-height, overflow scrolling, window resizing, and
+  light/dark preview behavior receive a real Gallery interaction check.
+- Deferred API decisions remain explicit; AnchorLayout and overlay questions
+  resolved after this baseline point to their current contracts.
+
+<!-- docs-nav:bottom:start -->
+---
+[Contents](../SUMMARY.md) · [Development index](README.md) · [Production Evidence Baselines →](production-evidence.md)
+<!-- docs-nav:bottom:end -->

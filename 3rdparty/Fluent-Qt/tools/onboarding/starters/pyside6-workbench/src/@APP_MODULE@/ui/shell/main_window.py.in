@@ -1,0 +1,82 @@
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QVBoxLayout, QWidget
+
+import fluentqt
+from fluentqt.layout import Card
+from fluentqt.textfields import Label
+from fluentqt.windowing import Window
+
+from @APP_MODULE@.application.workspace_controller import (
+    WorkspaceController,
+    WorkspaceViewState,
+)
+from @APP_MODULE@.ui.components.workbench_shell import WorkbenchShell
+from @APP_MODULE@.ui.pages.workspace_page import WorkspacePage
+from @APP_MODULE@.ui.theme.brand_theme import apply_brand_theme
+
+
+class MainWindow(Window):
+    def __init__(self, controller: WorkspaceController) -> None:
+        super().__init__()
+        self._controller = controller
+        self.setWindowTitle(@APP_NAME_PY@)
+        self.setMinimumSize(720, 540)
+        self.resize(1080, 720)
+
+        shell = WorkbenchShell()
+        navigation = QWidget(shell)
+        navigation_layout = QVBoxLayout(navigation)
+        navigation_layout.setContentsMargins(20, 22, 20, 20)
+        navigation_layout.setSpacing(8)
+
+        app_name = Label(@APP_NAME_PY@, navigation)
+        app_name.setFluentTypography(fluentqt.FontRole.Subtitle)
+        app_name.setTextElideMode(Qt.TextElideMode.ElideRight)
+        navigation_layout.addWidget(app_name)
+        section = Label("Workspace", navigation)
+        section.setTextColorRole(Label.TextColorRole.Secondary)
+        navigation_layout.addWidget(section)
+        navigation_layout.addSpacing(8)
+
+        selected = Card(navigation)
+        selected.setAppearance(Card.Appearance.Canvas)
+        selected_layout = QVBoxLayout(selected)
+        selected_layout.setContentsMargins(16, 14, 16, 14)
+        selected_layout.setSpacing(4)
+        self._navigation_title = Label(selected)
+        self._navigation_title.setFluentTypography(fluentqt.FontRole.BodyStrong)
+        selected_layout.addWidget(self._navigation_title)
+        self._navigation_path = Label(selected)
+        self._navigation_path.setTextColorRole(Label.TextColorRole.Secondary)
+        self._navigation_path.setTextElideMode(Qt.TextElideMode.ElideMiddle)
+        selected_layout.addWidget(self._navigation_path)
+        navigation_layout.addWidget(selected)
+        navigation_layout.addStretch()
+
+        hint = Label("FluentQt workbench", navigation)
+        hint.setFluentTypography(fluentqt.FontRole.Caption)
+        hint.setTextColorRole(Label.TextColorRole.Tertiary)
+        navigation_layout.addWidget(hint)
+
+        self._page = WorkspacePage(shell)
+        shell.set_navigation_widget(navigation)
+        shell.set_primary_widget(self._page)
+        self.setContentWidget(shell)
+
+        self._page.refresh_button.clicked.connect(self._refresh)
+        self._page.theme_button.clicked.connect(self._toggle_theme)
+        self._render(controller.state)
+
+    def _refresh(self) -> None:
+        self._controller.refresh()
+        self._render(self._controller.state)
+
+    def _toggle_theme(self) -> None:
+        self._controller.toggle_theme()
+        apply_brand_theme(self._controller.state.dark_theme)
+        self._render(self._controller.state)
+
+    def _render(self, state: WorkspaceViewState) -> None:
+        self._navigation_title.setText(state.title)
+        self._navigation_path.setText(state.path)
+        self._page.render(state)

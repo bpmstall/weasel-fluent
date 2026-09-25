@@ -1,0 +1,197 @@
+# Component API Conventions
+
+> **Status:** Current guide
+
+<!-- docs-nav:top:start -->
+[Documentation](../README.md) › [Development](README.md) › API, policy, and writing
+
+[Contents](../SUMMARY.md) · [Development index](README.md) · [Technical debt roadmap →](technical-debt-roadmap.md)
+<!-- docs-nav:top:end -->
+
+Use these conventions when adding, reviewing, or auditing public Fluent component
+APIs under `src/components/**`.
+
+## Scope
+
+- Treat public widgets under `src/components/**` as component API.
+- Treat `fluent::FluentElement`, `fluent::QMLPlus`, private headers, design tokens, and
+  compatibility helpers as supporting infrastructure unless the task explicitly
+  targets them.
+- Component foundation infrastructure lives under `src/components/foundation/`. Prefer
+  canonical includes such as `components/foundation/FluentElement.h`,
+  `components/foundation/QMLPlus.h`, and `components/foundation/overlay/...` in project
+  code.
+- Fluent is the only visual contract. New components and examples must not add
+  a design-language selector, alternate geometry preset, or per-language paint
+  branch. Product branding belongs in Fluent Light/Dark semantic tokens.
+- Public reusable component APIs use the canonical `fluent` namespace. The
+  previous `view::...` component namespace was removed as a deliberate breaking
+  migration; do not add `view` namespace aliases, compatibility typedefs, or
+  forwarding declarations for new code.
+- Before a new public C++ component or non-trivial API ships, record whether it
+  is supported by PySide6 in the same release slice or intentionally C++-only.
+  A private prototype may precede binding work; an installed public header must
+  not create an accidental, undocumented Python parity gap. Follow the
+  [PySide6 API compatibility policy](../../bindings/pyside6/API_COMPATIBILITY.md).
+- When performing an audit, update [Component API Audit](component-api-audit.md)
+  with inventory, findings, intentional deviations, applied fixes, deferred
+  follow-ups, and validation notes.
+- Run `python3 tools/quality/validate_component_api.py --project-root .` after
+  changing an installed component header, generated API catalog entry, or
+  focused component-test mapping. The machine-readable compatibility freeze
+  list is [component-api-policy.json](component-api-policy.json); a new entry
+  requires a documented compatibility reason rather than normalizing a new
+  exception into the baseline.
+
+## Inheritance and Ownership
+
+- Public widgets should expose Qt child containment, Fluent theme access, and
+  `fluent::QMLPlus` support directly or through an established project base such as
+  `fluent::basicinput::Button`.
+- Button-like entry surfaces should derive from `fluent::basicinput::Button` when
+  they do not require a more specialized Qt base class.
+- Views and host components should keep caller-owned content caller-owned. Do
+  not move application page choice, item composition, model ownership, or
+  navigation routing into a reusable component just to normalize APIs.
+- Hosted `QWidget` APIs that record `WidgetOwnership` use these names
+  consistently:
+
+  | API | Lifetime contract |
+  | --- | --- |
+  | `remove*()` / `take*()` | Detach and transfer the widget to the caller without applying the recorded ownership policy. |
+  | `release*()` | Apply the recorded policy: destroy `Owned`, detach `Borrowed`, or restore the original parent for `Reparented`. |
+
+  Keep legacy transfer behavior source-compatible; add a distinct `release*()`
+  API instead of repurposing an existing removal method.
+- Specialized Qt bases are acceptable when they carry essential behavior, such
+  as item views, scroll bars, dialogs, or line edits.
+
+## Properties, Setters, and Signals
+
+- `Q_PROPERTY` names should match established Qt conventions and nearby project
+  components.
+- Getter, setter, and signal names should form an obvious trio, for example
+  `value()`, `setValue(...)`, `valueChanged(...)`.
+- Boolean getters should communicate state clearly with `is*`, `has*`, `are*`,
+  or an established component-specific noun such as `canReorderItems()`.
+- Existing noun-style boolean getters may remain for source compatibility, but
+  new compatibility aliases should prefer the clearer `is*`, `has*`, or `are*`
+  shape when the original name is ambiguous.
+- Repeated setter calls with the currently stored value must be no-ops and must
+  not emit duplicate changed signals.
+- Setter normalization should be explicit in tests when values are clamped,
+  snapped, or converted to an empty value.
+
+## Nullable Values
+
+- Invalid Qt values such as `QDate()` and `QTime()` may represent an empty
+  selection when that matches WinUI-style picker semantics.
+- Empty selection behavior must be visible through public getters and focused
+  tests.
+- Clearing APIs should be named explicitly, such as `clearDate()`,
+  `clearSelectedDate()`, or `clearSelectedTime()`.
+- Setting an invalid nullable value should either clear the selection or be
+  documented as ignored; tests should cover the chosen behavior.
+
+## Open State
+
+- Components that expose popup, flyout, dropdown, calendar, or pane state should
+  provide a clear boolean getter, a command or setter to open/close, and a
+  changed signal. Same-window overlays use the state machine in
+  [Overlay Behavior](../architecture/overlay-behavior.md): public `isOpen` is
+  the logical requested state, not animation-complete and not `QWidget`
+  visibility.
+- `isOpen()` is the preferred common alias for button-like entry open state when
+  a component also keeps a more specific legacy getter such as
+  `isDropDownOpen()` or `isCalendarOpen()`.
+- Existing specific getters and setters should remain for compatibility unless a
+  separate breaking migration explicitly removes them.
+- Light-dismiss behavior should be tested separately from programmatic close
+  behavior.
+
+## Inherited Qt Interaction Contracts
+
+- Public components derived from an interactive Qt control must preserve the
+  base class's observable input signals with the same meaning and exact-once
+  delivery. An event override may call the Qt base implementation or reproduce
+  its signal contract explicitly; deliberate hit-zone exceptions must be
+  documented and covered by focused pointer tests.
+
+## Selection and Current Item Naming
+
+- Selection APIs should distinguish selected item(s), current item, activation,
+  and reorder state.
+- Multi-selection must document whether selection is Qt item-view driven or
+  component-specific.
+- Signals named `activated`, `clicked`, `currentChanged`, or `selectionChanged`
+  should match their Qt meaning where practical.
+- Public collection views derived from `QAbstractItemView` must preserve the
+  inherited `pressed(QModelIndex)` and `clicked(QModelIndex)` signals exactly
+  once on valid non-drag pointer paths, even when custom selection visuals,
+  release-time selection, or reorder handling intercepts the Qt event chain.
+  Component-specific `itemPressed` or `itemClicked` signals supplement those
+  inherited signals; they do not replace them.
+- Collection views should not own business item composition when model/delegate
+  ownership is caller-provided.
+- Large item views must scale through `QAbstractItemModel`, views, and delegates.
+  Do not create one persistent widget per row or cell, and do not copy model
+  data into a second component-owned store merely to style it.
+
+## Accessibility
+
+- Every public visible Gallery component must have exactly one entry in the
+  [Accessibility Inventory](accessibility-inventory.md). Run
+  `python3 tools/quality/validate_accessibility_inventory.py --project-root .`
+  after adding, removing, or reclassifying a component.
+- New or materially changed visible components follow the
+  [Accessibility Contract](accessibility-contract.md): role, caller-owned name
+  and description, value/state, keyboard path, real-change events, logical
+  children, and platform compatibility are reviewed explicitly.
+- A custom-painted interactive surface cannot be treated as accessible merely
+  because its root `QWidget` has an `accessibleName`. Use native child controls
+  or a private logical adapter; never create one persistent widget per model
+  item only to satisfy accessibility.
+- Focused semantic tests use the `Contract_Accessibility*` prefix and query
+  `QAccessibleInterface`. VisualCheck evidence cannot substitute for roles,
+  states, actions, or event/no-op contracts.
+
+## Fix or Defer
+
+- Prefer compatible aliases, missing no-op tests, missing nullable-value tests,
+  and documentation updates inside an audit change.
+- Do not remove, rename, or repurpose existing public API without a dedicated
+  breaking migration proposal.
+- Defer overlay open-state unification when modal, light-dismiss, visibility, or
+  hosted-content semantics are not yet specified.
+- Defer direct menu test expansion if the current change does not touch menu
+  behavior; record the follow-up in the audit report.
+- Remove obsolete entries from `component-api-policy.json` in the same change
+  that adds a notify signal or clearer boolean reader. The validator rejects
+  stale entries so the exception inventory can only shrink deliberately.
+
+## Tests and VisualCheck
+
+- Each component should have a focused `tests/components/<category>/Test<Name>.cpp`
+  file when it exposes public behavior.
+- Inheritance assertions are expected when the public contract depends on a Qt
+  base or project base class.
+- Signal no-op behavior should be tested for audited setters with changed
+  signals.
+- Nullable `QDate`, `QTime`, or equivalent empty value semantics should be
+  tested directly.
+- Visible business copy is owned by the application (`setText`, model roles,
+  placeholders). Prefer empty library defaults over hard-coded English marketing
+  strings (`InfoBar` title, `CalendarDatePicker` placeholder).
+- Culture-facing calendar/time labels (month names, weekday names, AM/PM) should
+  follow `QLocale` / an explicit `setLocale` on the control, not a forced English
+  locale inside the library.
+- Caption-button tooltips on `fluent::windowing::Window` default to empty; apps
+  that want language-specific tips call `setCaptionButtonToolTips(...)`.
+- VisualCheck tests must keep the `SKIP_VISUAL_TEST` guard, block with
+  `qApp->exec()`, and use project Fluent controls for visible demo UI when
+  practical.
+
+<!-- docs-nav:bottom:start -->
+---
+[Contents](../SUMMARY.md) · [Development index](README.md) · [Technical debt roadmap →](technical-debt-roadmap.md)
+<!-- docs-nav:bottom:end -->

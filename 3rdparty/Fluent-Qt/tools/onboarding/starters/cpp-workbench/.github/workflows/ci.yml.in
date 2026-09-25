@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: jurplel/install-qt-action@48d3ad6db93f3627c8ee7a0454bc6f3744f7e730 # v4.3.1
+        with:
+          version: 6.9.3
+          modules: qtimageformats
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: calvinhxx/Fluent-Qt
+          ref: v1.7.0
+          path: .fluentqt-source
+      - run: >-
+          cmake -S . -B build
+          -DFLUENTQT_SOURCE_DIR=${{ github.workspace }}/.fluentqt-source
+      - run: cmake --build build --parallel 4
+      - run: ctest --test-dir build --output-on-failure

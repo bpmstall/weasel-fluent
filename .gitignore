@@ -1,0 +1,23 @@
+# Build outputs
+build/
+dist/
+.xmake/
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.exe
+*.dll
+
+# IDE and System files
+.vscode/
+.idea/
+*.user
+*.log
+*.tmp
+__pycache__/
+
+# Root screenshot cache (preserve assets/screenshots)
+/*.png
+/*.ps1
+!/scripts/*.ps1

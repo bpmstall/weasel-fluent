@@ -1,0 +1,461 @@
+
+#include <QApplication>
+#include <QLabel>
+#include <QRadioButton>
+#include <QScrollArea>
+#include <QSignalSpy>
+
+#include <QSpinBox>
+#include <QStyle>
+#include <QTest>
+#include <QTimer>
+#include <gtest/gtest.h>
+#include "components/basicinput/Button.h"
+#include "components/basicinput/Slider.h"
+#include "components/foundation/FluentElement.h"
+#include "components/foundation/QMLPlus.h"
+#include "components/foundation/ThemeRegistry.h"
+#include "components/textfields/Label.h"
+
+#include <QImage>
+#include <limits>
+
+using namespace fluent::basicinput;
+using namespace fluent::textfields;
+using namespace fluent;
+
+// 与 TestButton 中一致的简易 Fluent 容器窗口
+class SliderFluentTestWindow : public QWidget, public fluent::FluentElement {
+public:
+    using QWidget::QWidget;
+
+    void onThemeUpdated() override
+    {
+        const auto& c = themeColors();
+        setStyleSheet(QString("background-color: %1;").arg(c.bgCanvas.name()));
+    }
+};
+
+class SliderTest : public ::testing::Test {
+protected:
+    void SetUp() override
+    {
+        scrollArea = new QScrollArea();
+        scrollArea->setWindowTitle("Slider Visual Test (WinUI 3 Inspired)");
+        scrollArea->resize(850, 600);
+
+        window = new SliderFluentTestWindow();
+        // Make window tall enough to show all content without being cut off
+        window->setFixedSize(800, 950);
+
+        layout = new AnchorLayout(window);
+        window->setLayout(layout);
+        window->onThemeUpdated();
+
+        scrollArea->setWidget(window);
+    }
+
+    void TearDown() override { delete scrollArea; }
+
+    QScrollArea* scrollArea = nullptr;
+    SliderFluentTestWindow* window = nullptr;
+    AnchorLayout* layout = nullptr;
+};
+
+TEST(SliderContractTest, Contract_DefaultMetricsAndQSliderSemantics)
+{
+    Slider slider(Qt::Horizontal);
+    EXPECT_EQ(slider.handleSize(), 20);
+    EXPECT_EQ(slider.trackHeight(), Spacing::XSmall);
+    EXPECT_DOUBLE_EQ(slider.hoverRatio(), 0.0);
+    EXPECT_DOUBLE_EQ(slider.pressRatio(), 0.0);
+
+    slider.setRange(10, 90);
+    slider.setValue(55);
+    slider.setHandleSize(24);
+    slider.setTrackHeight(6);
+    slider.setHoverRatio(0.5);
+    slider.setPressRatio(0.75);
+
+    EXPECT_EQ(slider.minimum(), 10);
+    EXPECT_EQ(slider.maximum(), 90);
+    EXPECT_EQ(slider.value(), 55);
+    EXPECT_EQ(slider.handleSize(), 24);
+    EXPECT_EQ(slider.trackHeight(), 6);
+    EXPECT_DOUBLE_EQ(slider.hoverRatio(), 0.5);
+    EXPECT_DOUBLE_EQ(slider.pressRatio(), 0.75);
+}
+
+TEST(SliderContractTest, Contract_PointerInteractionPreservesInheritedSignalsExactlyOnce)
+{
+    Slider slider(Qt::Horizontal);
+    slider.setRange(0, 100);
+    slider.resize(240, 40);
+
+    QSignalSpy pressedSpy(&slider, &QAbstractSlider::sliderPressed);
+    QSignalSpy releasedSpy(&slider, &QAbstractSlider::sliderReleased);
+
+    const QPoint center = slider.rect().center();
+    QTest::mousePress(&slider, Qt::LeftButton, Qt::NoModifier, center);
+    EXPECT_EQ(pressedSpy.count(), 1);
+    EXPECT_EQ(releasedSpy.count(), 0);
+
+    QTest::mouseRelease(&slider, Qt::LeftButton, Qt::NoModifier, center);
+    EXPECT_EQ(pressedSpy.count(), 1);
+    EXPECT_EQ(releasedSpy.count(), 1);
+}
+
+TEST(SliderContractTest, Contract_PointerAndFilledTrackRespectQtDirectionSemantics)
+{
+    struct DirectionCase {
+        Qt::Orientation orientation;
+        Qt::LayoutDirection direction;
+        bool inverted;
+        bool minimumAtStart;
+    };
+    const DirectionCase cases[] = {
+        {Qt::Horizontal, Qt::LeftToRight, false, true},
+        {Qt::Horizontal, Qt::LeftToRight, true, false},
+        {Qt::Horizontal, Qt::RightToLeft, false, false},
+        {Qt::Horizontal, Qt::RightToLeft, true, true},
+        {Qt::Vertical, Qt::LeftToRight, false, false},
+        {Qt::Vertical, Qt::LeftToRight, true, true},
+        {Qt::Vertical, Qt::RightToLeft, false, false},
+        {Qt::Vertical, Qt::RightToLeft, true, true},
+    };
+    for (const auto& item : cases) {
+        SCOPED_TRACE(::testing::Message() << "orientation=" << item.orientation << ", direction="
+                                          << item.direction << ", inverted=" << item.inverted);
+        Slider slider(item.orientation);
+        QSlider reference(item.orientation);
+        for (QSlider* target : {static_cast<QSlider*>(&slider), &reference}) {
+            target->setRange(-50, 150);
+            target->setLayoutDirection(item.direction);
+            target->setInvertedAppearance(item.inverted);
+        }
+        const bool horizontal = item.orientation == Qt::Horizontal;
+        slider.resize(horizontal ? QSize(240, 40) : QSize(40, 240));
+        const auto point = [horizontal](int position) {
+            return horizontal ? QPoint(position, 20) : QPoint(20, position);
+        };
+
+        QTest::mouseClick(&slider, Qt::LeftButton, Qt::NoModifier, point(0));
+        EXPECT_EQ(slider.value(), item.minimumAtStart ? -50 : 150);
+        QTest::mouseClick(&slider, Qt::LeftButton, Qt::NoModifier, point(239));
+        EXPECT_EQ(slider.value(), item.minimumAtStart ? 150 : -50);
+        QTest::mouseClick(&slider, Qt::LeftButton, Qt::NoModifier, point(120));
+        ASSERT_EQ(slider.value(), 50);
+
+        slider.setHoverRatio(0.0);
+        slider.setPressRatio(0.0);
+        const QImage image = slider.grab().toImage();
+        const auto sample = [&](int position) {
+            const QPoint pixel = point(position) * image.devicePixelRatio();
+            return image.pixelColor(pixel);
+        };
+        EXPECT_EQ(sample(item.minimumAtStart ? 60 : 180), slider.themeColors().accentDefault);
+        EXPECT_NE(sample(item.minimumAtStart ? 180 : 60), slider.themeColors().accentDefault);
+
+        reference.setValue(50);
+        const Qt::Key key = horizontal ? Qt::Key_Right : Qt::Key_Up;
+        QTest::keyClick(&slider, key);
+        QTest::keyClick(&reference, key);
+        EXPECT_EQ(slider.value(), reference.value());
+    }
+}
+
+TEST(SliderContractTest, Contract_FullIntegerRangePaintAndPointerMappingRemainStable)
+{
+    const int low = std::numeric_limits<int>::min();
+    const int high = std::numeric_limits<int>::max();
+    for (const int length : {240, 4200}) {
+        SCOPED_TRACE(length);
+        Slider slider(Qt::Horizontal);
+        slider.setRange(low, high);
+        slider.resize(length, 40);
+        Slider normalized(Qt::Horizontal);
+        normalized.setRange(0, 100);
+        normalized.resize(length, 40);
+
+        const int values[] = {low, 0, high};
+        const int percentages[] = {0, 50, 100};
+        for (int index = 0; index < 3; ++index) {
+            slider.setValue(values[index]);
+            normalized.setValue(percentages[index]);
+            EXPECT_EQ(slider.grab().toImage(), normalized.grab().toImage());
+        }
+
+        QTest::mouseClick(&slider, Qt::LeftButton, Qt::NoModifier, QPoint(0, 20));
+        EXPECT_EQ(slider.value(), low);
+        QTest::mouseClick(&slider, Qt::LeftButton, Qt::NoModifier, QPoint(length / 2, 20));
+        EXPECT_GE(slider.value(), -1);
+        EXPECT_LE(slider.value(), 1);
+        QTest::mouseClick(&slider, Qt::LeftButton, Qt::NoModifier, QPoint(length - 1, 20));
+        EXPECT_EQ(slider.value(), high);
+    }
+}
+
+TEST(SliderContractTest, Contract_AutomaticTicksHandleZeroStepsAndFullIntegerRanges)
+{
+    Slider slider(Qt::Horizontal);
+    slider.resize(240, 40);
+    slider.setRange(0, 100);
+    slider.setValue(50);
+    slider.setHoverRatio(1.0);
+    slider.setTickPosition(QSlider::TicksBelow);
+    slider.setTickInterval(10);
+    const QImage pageStepTicks = slider.grab().toImage();
+    slider.setTickInterval(0);
+    EXPECT_EQ(slider.grab().toImage(), pageStepTicks);
+
+    slider.setRange(0, 2);
+    slider.setSingleStep(0);
+    slider.setPageStep(0);
+    const QImage zeroStepTicks = slider.grab().toImage();
+    slider.setTickPosition(QSlider::NoTicks);
+    EXPECT_NE(slider.grab().toImage(), zeroStepTicks);
+
+    slider.setRange(std::numeric_limits<int>::min(), std::numeric_limits<int>::max());
+    slider.setValue(0);
+    const QImage noTicks = slider.grab().toImage();
+    slider.setTickPosition(QSlider::TicksBelow);
+    slider.setTickInterval(std::numeric_limits<int>::max());
+    EXPECT_NE(slider.grab().toImage(), noTicks);
+    slider.setTickInterval(1);
+    EXPECT_EQ(slider.grab().toImage(), noTicks);
+}
+
+TEST(SliderContractTest, Contract_LightAndDarkRangeExtremesPaintDistinctly)
+{
+    const FluentElement::Theme themes[]{FluentElement::Light, FluentElement::Dark};
+    for (const auto theme : themes) {
+        FluentElement::setTheme(theme);
+        Slider slider(Qt::Horizontal);
+        slider.setRange(0, 100);
+        slider.resize(240, 40);
+
+        slider.setValue(0);
+        const QImage minimum = slider.grab().toImage();
+        slider.setValue(100);
+        const QImage maximum = slider.grab().toImage();
+
+        ASSERT_FALSE(minimum.isNull()) << "theme=" << theme;
+        ASSERT_EQ(maximum.size(), minimum.size()) << "theme=" << theme;
+        EXPECT_NE(maximum, minimum) << "theme=" << theme;
+    }
+
+    ThemeRegistry::instance().resetToDefaults();
+    FluentElement::setTheme(FluentElement::Light);
+}
+
+TEST_F(SliderTest, VisualSliderGalleryLike)
+{
+    if (qEnvironmentVariableIsSet("SKIP_VISUAL_TEST")) {
+        GTEST_SKIP() << "Set SKIP_VISUAL_TEST=1 to skip visual tests";
+    }
+    if (qEnvironmentVariableIsSet("QT_QPA_PLATFORM") &&
+        qEnvironmentVariable("QT_QPA_PLATFORM") == "offscreen") {
+        GTEST_SKIP() << "Skipping visual test in offscreen mode";
+    }
+
+    using Edge = AnchorLayout::Edge;
+
+    auto createLabel = [&](const QString& text, QWidget* anchor, int topMargin = 30) {
+        Label* l = new Label(text, window);
+        l->anchors()->top = {anchor, Edge::Bottom, topMargin};
+        l->anchors()->left = {window, Edge::Left, 40};
+        layout->addWidget(l);
+        return l;
+    };
+
+    // 顶部标题 + 描述（参考 WinUI 3 Gallery）
+    Label* pageTitle = new Label("Slider", window);
+    pageTitle->anchors()->top = {window, Edge::Top, 16};
+    pageTitle->anchors()->left = {window, Edge::Left, 40};
+    layout->addWidget(pageTitle);
+
+    Label* pageDesc = new Label("Use a Slider when you want your users to be able to set "
+                                "defined, contiguous values "
+                                "(such as volume or brightness) or a range of discrete values "
+                                "(such as screen resolution settings).",
+                                window);
+    pageDesc->setWordWrap(true);
+    pageDesc->anchors()->top = {pageTitle, Edge::Bottom, 8};
+    pageDesc->anchors()->left = {window, Edge::Left, 40};
+    pageDesc->anchors()->right = {window, Edge::Right, -40};
+    layout->addWidget(pageDesc);
+
+    // --- 1. Simple Slider ---
+    Label* title1 = new Label("A simple Slider.", window);
+    title1->anchors()->top = {pageDesc, Edge::Bottom, 24};
+    title1->anchors()->left = {window, Edge::Left, 40};
+    layout->addWidget(title1);
+
+    Slider* simpleSlider = new Slider(Qt::Horizontal, window);
+    simpleSlider->setRange(0, 100);
+    simpleSlider->setValue(32);
+    simpleSlider->setFixedWidth(260);
+    simpleSlider->anchors()->top = {title1, Edge::Bottom, 10};
+    simpleSlider->anchors()->left = {window, Edge::Left, 40};
+    layout->addWidget(simpleSlider);
+
+    Label* simpleOutputLabel = new Label("Output: 32", window);
+    simpleOutputLabel->anchors()->verticalCenter = {simpleSlider, Edge::VCenter, 0};
+    simpleOutputLabel->anchors()->left = {simpleSlider, Edge::Right, 30};
+    layout->addWidget(simpleOutputLabel);
+
+    QObject::connect(simpleSlider, &QSlider::valueChanged, [simpleOutputLabel](int v) {
+        simpleOutputLabel->setText(QStringLiteral("Output: %1").arg(v));
+    });
+
+    // --- 2. Slider with range and steps specified ---
+    Label* title2 = createLabel("A Slider with range and steps specified.", simpleSlider);
+
+    Slider* rangeSlider = new Slider(Qt::Horizontal, window);
+    rangeSlider->setRange(500, 1000);
+    rangeSlider->setSingleStep(10); // SmallChange
+    rangeSlider->setPageStep(50);
+    rangeSlider->setValue(800);
+    rangeSlider->setFixedWidth(260);
+    rangeSlider->anchors()->top = {title2, Edge::Bottom, 10};
+    rangeSlider->anchors()->left = {window, Edge::Left, 40};
+    layout->addWidget(rangeSlider);
+
+    Label* rangeOutputLabel = new Label("Output: 800", window);
+    rangeOutputLabel->anchors()->verticalCenter = {rangeSlider, Edge::VCenter, 0};
+    rangeOutputLabel->anchors()->left = {rangeSlider, Edge::Right, 30};
+    layout->addWidget(rangeOutputLabel);
+
+    QObject::connect(rangeSlider, &QSlider::valueChanged, [rangeOutputLabel](int v) {
+        rangeOutputLabel->setText(QStringLiteral("Output: %1").arg(v));
+    });
+
+    // 右侧显示当前最小值 / 最大值 / 步长设置（仿 WinUI 属性面板）
+    const int panelLeft = 420;
+
+    auto createSpinRow = [&](const QString& text, int value, int rowIndex) {
+        Label* lbl = new Label(text, window);
+        lbl->anchors()->top = {title2, Edge::Bottom, 10 + rowIndex * 36};
+        lbl->anchors()->left = {window, Edge::Left, panelLeft};
+        layout->addWidget(lbl);
+
+        QSpinBox* spin = new QSpinBox(window);
+        spin->setRange(-100000, 100000);
+        spin->setValue(value);
+        AnchorLayout::Anchors a;
+        a.verticalCenter = {lbl, Edge::VCenter, 0};
+        a.left = {lbl, Edge::Right, 10};
+        layout->addAnchoredWidget(spin, a);
+        return spin;
+    };
+
+    QSpinBox* minSpin = createSpinRow("Minimum:", rangeSlider->minimum(), 0);
+    QSpinBox* maxSpin = createSpinRow("Maximum:", rangeSlider->maximum(), 1);
+    QSpinBox* stepSpin = createSpinRow("StepFrequency:", rangeSlider->singleStep(), 2);
+    QSpinBox* smallSpin = createSpinRow("SmallChange:", rangeSlider->singleStep(), 3);
+
+    QObject::connect(minSpin, qOverload<int>(&QSpinBox::valueChanged), rangeSlider,
+                     &QSlider::setMinimum);
+    QObject::connect(maxSpin, qOverload<int>(&QSpinBox::valueChanged), rangeSlider,
+                     &QSlider::setMaximum);
+    QObject::connect(stepSpin, qOverload<int>(&QSpinBox::valueChanged), rangeSlider,
+                     &QSlider::setTickInterval);
+    QObject::connect(smallSpin, qOverload<int>(&QSpinBox::valueChanged), rangeSlider,
+                     &QSlider::setSingleStep);
+
+    // --- 3. Slider with tick marks ---
+    // Fix: Anchor to smallSpin because the property panel on the right is taller than the slider itself
+    Label* title3 = createLabel("A Slider with tick marks.", smallSpin);
+
+    Slider* tickSlider = new Slider(Qt::Horizontal, window);
+    tickSlider->setRange(0, 10);
+    tickSlider->setTickInterval(1);
+    tickSlider->setTickPosition(QSlider::TicksBelow);
+    tickSlider->setFixedWidth(260);
+    tickSlider->anchors()->top = {title3, Edge::Bottom, 10};
+    tickSlider->anchors()->left = {window, Edge::Left, 40};
+    layout->addWidget(tickSlider);
+
+    Label* tickOutputLabel = new Label("Output: 0", window);
+    tickOutputLabel->anchors()->verticalCenter = {tickSlider, Edge::VCenter, 0};
+    tickOutputLabel->anchors()->left = {tickSlider, Edge::Right, 30};
+    layout->addWidget(tickOutputLabel);
+
+    QObject::connect(tickSlider, &QSlider::valueChanged, [tickOutputLabel](int v) {
+        tickOutputLabel->setText(QStringLiteral("Output: %1").arg(v));
+    });
+
+    // Snaps to：StepValues / Ticks
+    Label* snapsLabel = new Label("Snaps to:", window);
+    snapsLabel->anchors()->top = {tickSlider, Edge::Top, 0};
+    snapsLabel->anchors()->left = {tickSlider, Edge::Right, 80};
+    layout->addWidget(snapsLabel);
+
+    QRadioButton* snapsStep = new QRadioButton("StepValues", window);
+    snapsStep->setChecked(true);
+    {
+        AnchorLayout::Anchors a;
+        a.top = {snapsLabel, Edge::Bottom, 8};
+        a.left = {snapsLabel, Edge::Left, 0};
+        layout->addAnchoredWidget(snapsStep, a);
+    }
+
+    QRadioButton* snapsTicks = new QRadioButton("Ticks", window);
+    {
+        AnchorLayout::Anchors a;
+        a.top = {snapsStep, Edge::Bottom, 4};
+        a.left = {snapsStep, Edge::Left, 0};
+        layout->addAnchoredWidget(snapsTicks, a);
+    }
+
+    QObject::connect(snapsStep, &QRadioButton::toggled, [tickSlider](bool on) {
+        if (on) {
+            tickSlider->setSingleStep(1);
+        }
+    });
+    QObject::connect(snapsTicks, &QRadioButton::toggled, [tickSlider](bool on) {
+        if (on) {
+            int interval = tickSlider->tickInterval();
+            if (interval <= 0)
+                interval = 1;
+            tickSlider->setSingleStep(interval);
+        }
+    });
+
+    // --- 4. Vertical Slider 示例 ---
+    Label* title4 = createLabel("Vertical Slider", tickSlider);
+
+    Slider* verticalSlider = new Slider(Qt::Vertical, window);
+    verticalSlider->setRange(0, 100);
+    verticalSlider->setValue(25);
+    verticalSlider->setFixedHeight(160);
+    verticalSlider->anchors()->top = {title4, Edge::Bottom, 10};
+    verticalSlider->anchors()->left = {window, Edge::Left, 80};
+    layout->addWidget(verticalSlider);
+
+    Label* verticalOutputLabel = new Label("Output: 25", window);
+    verticalOutputLabel->anchors()->top = {verticalSlider, Edge::Top, 0};
+    verticalOutputLabel->anchors()->left = {verticalSlider, Edge::Right, 40};
+    layout->addWidget(verticalOutputLabel);
+
+    QObject::connect(verticalSlider, &QSlider::valueChanged, [verticalOutputLabel](int v) {
+        verticalOutputLabel->setText(QStringLiteral("Output: %1").arg(v));
+    });
+
+    // 主题切换按钮，方便观察浅色 / 深色下的滑块样式
+    Button* themeBtn = new Button("Switch Theme", window);
+    themeBtn->setFixedSize(120, 32);
+    themeBtn->anchors()->bottom = {window, Edge::Bottom, -30};
+    themeBtn->anchors()->right = {window, Edge::Right, -40};
+    layout->addWidget(themeBtn);
+
+    QObject::connect(themeBtn, &Button::clicked, []() {
+        fluent::FluentElement::setTheme(fluent::FluentElement::currentTheme() ==
+                                                fluent::FluentElement::Light
+                                            ? fluent::FluentElement::Dark
+                                            : fluent::FluentElement::Light);
+    });
+
+    scrollArea->show();
+    qApp->exec();
+}

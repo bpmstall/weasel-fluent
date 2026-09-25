@@ -1,0 +1,429 @@
+#include "Slider.h"
+#include "components/foundation/private/MotionPolicy_p.h"
+#include "components/status_info/ToolTip.h"
+#include "components/textfields/Label.h"
+#include <QMouseEvent>
+
+#include <QPainter>
+#include <QPropertyAnimation>
+#include <QStyle>
+#include <QStyleOptionSlider>
+#include <algorithm>
+
+#include "design/Typography.h"
+
+namespace fluent::basicinput {
+
+using namespace fluent::textfields;
+
+Slider::Slider(Qt::Orientation orientation, QWidget* parent) : QSlider(orientation, parent)
+{
+    setAttribute(Qt::WA_Hover);
+
+    // m_handleSize is initialized to 20 in header
+
+    const auto& anim = themeAnimation();
+
+    m_hoverAnim = new QPropertyAnimation(this, "hoverRatio", this);
+    m_hoverAnim->setDuration(anim.normal);
+    m_hoverAnim->setEasingCurve(anim.decelerate);
+
+    m_pressAnim = new QPropertyAnimation(this, "pressRatio", this);
+    m_pressAnim->setDuration(anim.normal);
+    m_pressAnim->setEasingCurve(anim.decelerate);
+}
+
+Slider::Slider(QWidget* parent) : Slider(Qt::Horizontal, parent) {}
+
+Slider::~Slider()
+{
+    if (m_toolTip) {
+        delete m_toolTip;
+    }
+}
+
+QSize Slider::sizeHint() const
+{
+    // Ensure enough space for the handle to avoid clipping
+    // The thickness (height/width) should be at least m_handleSize + some margin
+    int length = m_defaultLength;
+    // Add small margin (e.g. 2 * m_visualMargin) to avoid anti-aliasing clipping
+    int thickness = std::max(m_handleSize, m_trackHeight) + 2 * m_visualMargin;
+
+    if (orientation() == Qt::Horizontal) {
+        return QSize(length, thickness);
+    } else {
+        return QSize(thickness, length);
+    }
+}
+
+void Slider::paintEvent(QPaintEvent*)
+{
+    QStyleOptionSlider opt;
+    initStyleOption(&opt);
+
+    QPainter p(this);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setRenderHint(QPainter::TextAntialiasing);
+
+    if (opt.orientation == Qt::Horizontal) {
+        drawHorizontal(p, opt);
+    } else {
+        drawVertical(p, opt);
+    }
+}
+
+void Slider::enterEvent(FluentEnterEvent* event)
+{
+    m_hoverAnim->stop();
+    m_hoverAnim->setEndValue(1.0);
+    ::fluent::detail::startMotionTransition(m_hoverAnim, themeAnimation().normal);
+    QSlider::enterEvent(event);
+}
+
+void Slider::leaveEvent(QEvent* event)
+{
+    if (!m_isPressed) { // Only fade out if not currently dragging
+        m_hoverAnim->stop();
+        m_hoverAnim->setEndValue(0.0);
+        ::fluent::detail::startMotionTransition(m_hoverAnim, themeAnimation().normal);
+    }
+    QSlider::leaveEvent(event);
+}
+
+void Slider::mousePressEvent(QMouseEvent* event)
+{
+    if (event->button() != Qt::LeftButton) {
+        event->ignore();
+        return;
+    }
+    event->accept();
+    m_isPressed = true;
+    setSliderDown(true);
+
+    // Animate Press
+    m_pressAnim->stop();
+    m_pressAnim->setEndValue(1.0);
+    ::fluent::detail::startMotionTransition(m_pressAnim, themeAnimation().normal);
+
+    // Show ToolTip
+    showToolTip();
+
+    int val = pixelPosToRangeValue(orientation() == Qt::Horizontal ? fluentMousePos(event).x()
+                                                                   : fluentMousePos(event).y());
+    setSliderPosition(val);
+    updateToolTipPos(); // update after value change
+
+    triggerAction(SliderMove);
+    update();
+}
+
+void Slider::mouseMoveEvent(QMouseEvent* event)
+{
+    if (!m_isPressed) {
+        event->ignore();
+        return;
+    }
+    event->accept();
+    int val = pixelPosToRangeValue(orientation() == Qt::Horizontal ? fluentMousePos(event).x()
+                                                                   : fluentMousePos(event).y());
+    setSliderPosition(val);
+    updateToolTipPos();
+
+    triggerAction(SliderMove);
+    update();
+}
+
+void Slider::mouseReleaseEvent(QMouseEvent* event)
+{
+    if (event->button() != Qt::LeftButton) {
+        event->ignore();
+        return;
+    }
+    event->accept();
+    m_isPressed = false;
+    // QAbstractSlider emits sliderReleased() when sliderDown transitions to false.
+    // zh_CN: sliderDown 切换为 false 时，QAbstractSlider 会发送 sliderReleased()。
+    setSliderDown(false);
+
+    // Animate Release
+    m_pressAnim->stop();
+    m_pressAnim->setEndValue(0.0);
+    ::fluent::detail::startMotionTransition(m_pressAnim, themeAnimation().normal);
+
+    // Reset Hover if mouse left during drag
+    if (!rect().contains(mapFromGlobal(QCursor::pos()))) {
+        m_hoverAnim->stop();
+        m_hoverAnim->setEndValue(0.0);
+        ::fluent::detail::startMotionTransition(m_hoverAnim, themeAnimation().normal);
+    }
+
+    hideToolTip();
+
+    triggerAction(SliderMove);
+    update();
+}
+
+void Slider::showToolTip()
+{
+    if (!m_toolTip) {
+        m_toolTip = new fluent::status_info::ToolTip(nullptr); // Top level window
+    }
+    m_toolTip->setText(QString::number(value()));
+    updateToolTipPos();
+    m_toolTip->show();
+    m_toolTip->raise();
+}
+
+void Slider::hideToolTip()
+{
+    if (m_toolTip) {
+        m_toolTip->hide();
+    }
+}
+
+void Slider::updateToolTipPos()
+{
+    if (!m_toolTip || !m_toolTip->isVisible())
+        return;
+
+    m_toolTip->setText(QString::number(value()));
+
+    QPoint handlePos;
+    int pos = valueToPixelPos(value());
+    const int cy = height() / 2;
+    const int cx = width() / 2;
+
+    if (orientation() == Qt::Horizontal) {
+        handlePos = QPoint(pos, cy);
+    } else {
+        handlePos = QPoint(cx, pos);
+    }
+
+    QPoint globalHandle = mapToGlobal(handlePos);
+
+    // Position tooltip above (Horiz) or Right (Vertical)
+    int tipW = m_toolTip->width();
+    int tipH = m_toolTip->height();
+    int spacing = themeSpacing().medium;
+
+    QPoint tipPos;
+    if (orientation() == Qt::Horizontal) {
+        tipPos = QPoint(globalHandle.x() - tipW / 2,
+                        globalHandle.y() - tipH - spacing - m_handleSize / 2);
+    } else {
+        // Vertical: Right side preferred, fallback to left if no space?
+        // WinUI usually puts it to the side.
+        tipPos = QPoint(globalHandle.x() + m_handleSize / 2 + spacing, globalHandle.y() - tipH / 2);
+    }
+
+    m_toolTip->move(tipPos);
+}
+
+int Slider::valueToPixelPos(int val) const
+{
+    QStyleOptionSlider opt;
+    initStyleOption(&opt);
+    const int padding = m_handleSize / 2 + m_visualMargin;
+    const int length = orientation() == Qt::Horizontal ? width() : height();
+    const int available = qMax(0, length - 2 * padding);
+    const qint64 range = static_cast<qint64>(maximum()) - minimum();
+    if (range == 0)
+        return padding + (opt.upsideDown ? available : 0);
+
+    // Widen before subtraction and multiplication, including tracks wider than 4096 px.
+    // zh_CN: 减法和乘法前提升位宽，兼容完整 int 范围和超过 4096 像素的轨道。
+    const int boundedValue = qBound(minimum(), val, maximum());
+    const qint64 offset = opt.upsideDown ? static_cast<qint64>(maximum()) - boundedValue
+                                         : static_cast<qint64>(boundedValue) - minimum();
+    return padding + static_cast<int>((offset * available + range / 2) / range);
+}
+
+int Slider::pixelPosToRangeValue(int pos) const
+{
+    QStyleOptionSlider opt;
+    initStyleOption(&opt);
+    const int padding = m_handleSize / 2 + m_visualMargin;
+    const int length = orientation() == Qt::Horizontal ? width() : height();
+    const int available = qMax(0, length - 2 * padding);
+    if (available <= 0)
+        return minimum();
+    return QStyle::sliderValueFromPosition(minimum(), maximum(), pos - padding, available,
+                                           opt.upsideDown);
+}
+
+void Slider::drawHorizontal(QPainter& p, const QStyleOptionSlider& opt)
+{
+    const auto& colors = themeColorsRef();
+
+    const int cy = height() / 2;
+    const int padding = m_handleSize / 2 + m_visualMargin;
+
+    const int trackThickness = m_trackHeight;
+
+    // 1. Track geometry. zh_CN: 计算轨道几何区域。
+    QRect trackRect(padding, cy - trackThickness / 2, width() - 2 * padding, trackThickness);
+
+    int handleX = valueToPixelPos(opt.sliderPosition);
+    QPointF center(handleX, cy);
+
+    const int minimumX = valueToPixelPos(opt.minimum);
+    QRectF filledRect(qMin(minimumX, handleX), cy - trackThickness / 2, qAbs(handleX - minimumX),
+                      trackThickness);
+
+    // 2. State colors. zh_CN: 确定状态颜色。
+    QColor trackBg = isEnabled() ? colors.controlAltSecondary : colors.controlDisabled;
+    QColor trackFg = isEnabled() ? colors.accentDefault : colors.accentDisabled;
+
+    // 3. Paint the track background (the inactive portion). zh_CN: 绘制轨道背景(未填充段)。
+    p.setPen(Qt::NoPen);
+    p.setBrush(trackBg);
+    p.drawRoundedRect(QRectF(trackRect), trackThickness / 2.0, trackThickness / 2.0);
+
+    // 4. Paint the filled track. zh_CN: 绘制已填充轨道。
+    if (filledRect.width() > 0.0) {
+        p.setBrush(trackFg);
+        p.drawRoundedRect(filledRect, trackThickness / 2.0, trackThickness / 2.0);
+    }
+
+    // 5. Animated thumb geometry. zh_CN: 拇指动画几何计算。
+    qreal baseRadius = m_handleSize / 2.0;
+
+    // Fluent thumb: white outer ring with an accent inner dot.
+    // zh_CN: 默认 Fluent,WinUI 拇指处理不变——白色外圈、强调色内圆点。
+    // Matches the horizontal painter: white outer ring, accent inner dot that
+    // grows from 0.45 (rest) to 0.7 (hover).
+    // zh_CN: 与水平绘制一致——白色外圈、蓝色内圈扩展，0.45（静止）→ 0.7（悬停）。
+    qreal innerScale = 0.45 + (0.25 * m_hoverRatio);
+    qreal innerRadius = baseRadius * innerScale;
+
+    // 6. Thumb colors. zh_CN: 确定拇指视觉颜色。
+    // Outer ring: bgSolid fill (white in light theme) erases the track behind it;
+    // painting a filled outer circle then the accent inner circle reads as a border.
+    // zh_CN: 外圈用 bgSolid 填充（亮色主题为白色）以遮住轨道；先画填充外圆、再画
+    // 蓝色实心内圆，视觉上即“边框”。
+
+    QColor outerFillColor = colors.bgSolid; // White in the light theme. zh_CN: 亮色主题下为白色。
+    QColor outerBorderColor = colors.strokeStrong; // Thin light-grey ring. zh_CN: 浅灰色细环。
+    QColor innerColor = trackFg;                   // Accent color. zh_CN: Accent 颜色。
+
+    if (!isEnabled()) {
+        innerColor = colors.textDisabled;
+        outerBorderColor = colors.strokeDivider;
+    } else {
+        if (m_pressRatio > 0.5) {
+            innerColor = colors.accentTertiary;
+            outerBorderColor = colors.strokeStrong; // Keep the ring. zh_CN: 保持边框。
+        } else if (m_hoverRatio > 0.5) {
+            innerColor = colors.accentSecondary;
+        }
+    }
+
+    // 7. Paint the outer circle: filled container with a thin ring that masks
+    // the track behind, producing the "white border" look.
+    // zh_CN: 绘制外圆（白色填充带细边框），形成“白色外边框”遮罩，挡住背后的轨道。
+    p.setBrush(outerFillColor);
+    p.setPen(QPen(outerBorderColor, 1));
+    p.drawEllipse(center, baseRadius, baseRadius);
+
+    // 8. Paint the inner accent circle. zh_CN: 绘制内层圆形（蓝色中心）。
+    p.setBrush(innerColor);
+    p.setPen(Qt::NoPen);
+    p.drawEllipse(center, innerRadius, innerRadius);
+
+    // 9. Paint the ticks. zh_CN: 绘制刻度线。
+    if (opt.tickPosition != QSlider::NoTicks && m_hoverRatio > 0.1) {
+        const qint64 range = static_cast<qint64>(opt.maximum) - opt.minimum;
+        qint64 interval = opt.tickInterval;
+        if (interval <= 0) {
+            interval = qMax(1, opt.singleStep);
+            if (range / interval >= 100 && opt.pageStep > 0)
+                interval = opt.pageStep;
+        }
+        const qint64 steps = range / interval;
+        if (steps > 0 && steps < 100) {
+            QColor tickColor = colors.textSecondary;
+            p.setPen(tickColor);
+            for (int i = 0; i <= steps; ++i) {
+                const int val = static_cast<int>(static_cast<qint64>(opt.minimum) + i * interval);
+                int x = valueToPixelPos(val);
+                int ty = (opt.tickPosition == QSlider::TicksAbove) ? (trackRect.top() - 4)
+                                                                   : (trackRect.bottom() + 4);
+                p.drawLine(x, ty, x, ty + 2);
+            }
+        }
+    }
+}
+
+void Slider::drawVertical(QPainter& p, const QStyleOptionSlider& opt)
+{
+    const auto& colors = themeColorsRef();
+
+    const int cx = width() / 2;
+    const int padding = m_handleSize / 2 + m_visualMargin;
+
+    const int trackThickness = m_trackHeight;
+
+    // 1. Track geometry. zh_CN: 计算轨道几何区域。
+    QRect trackRect(cx - trackThickness / 2, padding, trackThickness, height() - 2 * padding);
+
+    int handleY = valueToPixelPos(opt.sliderPosition);
+    QPointF center(cx, handleY);
+
+    const int minimumY = valueToPixelPos(opt.minimum);
+    QRectF filledRect(cx - trackThickness / 2, qMin(minimumY, handleY), trackThickness,
+                      qAbs(handleY - minimumY));
+
+    // 2. State colors. zh_CN: 确定状态颜色。
+    QColor trackBg = isEnabled() ? colors.controlAltSecondary : colors.controlDisabled;
+    QColor trackFg = isEnabled() ? colors.accentDefault : colors.accentDisabled;
+
+    // 3. Paint the track background (the inactive portion). zh_CN: 绘制轨道背景(未填充段)。
+    p.setPen(Qt::NoPen);
+    p.setBrush(trackBg);
+    p.drawRoundedRect(QRectF(trackRect), trackThickness / 2.0, trackThickness / 2.0);
+
+    // 4. Paint the filled track. zh_CN: 绘制已填充轨道。
+    if (filledRect.height() > 0.0) {
+        p.setBrush(trackFg);
+        p.drawRoundedRect(filledRect, trackThickness / 2.0, trackThickness / 2.0);
+    }
+
+    // 5. Animated thumb geometry. zh_CN: 拇指动画几何计算。
+    qreal baseRadius = m_handleSize / 2.0;
+
+    // Fluent thumb treatment.
+    // zh_CN: Fluent 拇指样式。
+    // Matches the horizontal painter: white outer ring, accent inner dot that
+    // grows from 0.45 (rest) to 0.7 (hover).
+    // zh_CN: 与水平绘制一致——白色外圈、蓝色内圈扩展，0.45（静止）→ 0.7（悬停）。
+    qreal innerScale = 0.45 + (0.25 * m_hoverRatio);
+    qreal innerRadius = baseRadius * innerScale;
+
+    // 6. Thumb colors. zh_CN: 确定拇指视觉颜色。
+    QColor outerFillColor = colors.bgSolid;
+    QColor outerBorderColor = colors.strokeStrong;
+    QColor innerColor = trackFg;
+
+    if (!isEnabled()) {
+        innerColor = colors.textDisabled;
+        outerBorderColor = colors.strokeDivider;
+    } else {
+        if (m_pressRatio > 0.5) {
+            innerColor = colors.accentTertiary;
+        } else if (m_hoverRatio > 0.5) {
+            innerColor = colors.accentSecondary;
+        }
+    }
+
+    // 7. Paint the outer circle. zh_CN: 绘制外层圆形。
+    p.setBrush(outerFillColor);
+    p.setPen(QPen(outerBorderColor, 1));
+    p.drawEllipse(center, baseRadius, baseRadius);
+
+    // 8. Paint the inner circle. zh_CN: 绘制内层圆形。
+    p.setBrush(innerColor);
+    p.setPen(Qt::NoPen);
+    p.drawEllipse(center, innerRadius, innerRadius);
+}
+} // namespace fluent::basicinput

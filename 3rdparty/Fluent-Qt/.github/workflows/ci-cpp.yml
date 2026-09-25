@@ -1,0 +1,918 @@
+name: C++ CI module
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: Validation tier selected by the CI orchestrator.
+        required: true
+        type: string
+      cpp_test_scope:
+        description: Pull-request C++ test scope (none, selected, or all).
+        required: false
+        default: none
+        type: string
+      cpp_test_label_regex:
+        description: Trusted CTest label regex selected by the orchestrator.
+        required: false
+        default: ""
+        type: string
+      cpp_test_targets:
+        description: Trusted space-separated CMake test targets selected by the orchestrator.
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    name: Plan C++ validation
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      mode: ${{ steps.matrix.outputs.mode }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 2
+
+      - name: Validate C++ CI catalogs
+        shell: bash
+        run: |
+          python3 .github/scripts/test_validate_ci_cpp_matrix.py
+          python3 .github/scripts/validate-package-matrix.py
+          python3 .github/scripts/validate-project-metadata.py
+          python3 tools/quality/test_check_cpp_format.py
+          python3 tools/quality/validate_component_api.py --project-root . --self-test
+          python3 tools/quality/validate_visual_evidence_inventory.py --project-root . --self-test
+
+      - name: Check changed C++ formatting
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          changed_files="$(
+            git diff --name-only --diff-filter=ACMR "$PR_BASE_SHA...HEAD" --
+          )"
+          if grep -Eiq '\.(c|cc|cpp|cxx|h|hh|hpp|hxx)$' <<< "$changed_files"; then
+            formatter="$(npm exec --yes --package=clang-format@1.8.0 -- which clang-format)"
+            python3 tools/quality/check_cpp_format.py --changed-from "$PR_BASE_SHA" --clang-format "$formatter"
+          else
+            echo "No changed C++ files require formatting checks."
+          fi
+
+      - name: Select C++ validation matrix
+        id: matrix
+        env:
+          VALIDATION_MODE: ${{ inputs.mode }}
+          CPP_TEST_SCOPE: ${{ inputs.cpp_test_scope }}
+          CPP_TEST_LABEL_REGEX: ${{ inputs.cpp_test_label_regex }}
+          CPP_TEST_TARGETS: ${{ inputs.cpp_test_targets }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          case "$VALIDATION_MODE" in
+            fast|full) ;;
+            *)
+              echo "::error::Unsupported C++ validation tier: $VALIDATION_MODE"
+              exit 1
+              ;;
+          esac
+
+          selected_label_pattern='^\^\([a-z_]+(\|[a-z_]+)*\)\$$'
+          selected_target_pattern='^fluent_qt_[a-z_]+_tests( fluent_qt_[a-z_]+_tests)*$'
+          case "$CPP_TEST_SCOPE" in
+            none)
+              [[ -z "$CPP_TEST_LABEL_REGEX" && -z "$CPP_TEST_TARGETS" ]] || {
+                echo "::error::The none C++ test scope must not provide labels or targets."
+                exit 1
+              }
+              ;;
+            selected)
+              [[ "$CPP_TEST_LABEL_REGEX" =~ $selected_label_pattern &&
+                 "$CPP_TEST_TARGETS" =~ $selected_target_pattern ]] || {
+                echo "::error::Invalid selected C++ test labels or targets."
+                exit 1
+              }
+              ;;
+            all)
+              [[ "$CPP_TEST_LABEL_REGEX" == '^qt$' &&
+                 "$CPP_TEST_TARGETS" == 'fluent_qt_all_tests' ]] || {
+                echo "::error::Invalid all-tests C++ selection."
+                exit 1
+              }
+              ;;
+            *)
+              echo "::error::Unsupported C++ test scope: $CPP_TEST_SCOPE"
+              exit 1
+              ;;
+          esac
+
+          matrix="$(
+            jq -c \
+              --arg mode "$VALIDATION_MODE" \
+              --arg test_scope "$CPP_TEST_SCOPE" \
+              --arg test_label_regex "$CPP_TEST_LABEL_REGEX" \
+              --arg test_targets "$CPP_TEST_TARGETS" \
+              '{include: [.scenarios[] |
+                select(.mode == $mode) |
+                del(.mode) |
+                if $mode == "fast" and
+                   .id == "linux-x64-qt62-fast" and
+                   $test_scope != "none"
+                then
+                  .build_targets = (
+                    if $test_scope == "all" then $test_targets
+                    else .build_targets + " " + $test_targets
+                    end
+                  ) |
+                  .test_labels = "(" + .test_labels + "|" + $test_label_regex + ")"
+                else .
+                end]}' \
+              .github/ci-cpp-matrix.json
+          )"
+          scenario_count="$(jq '.include | length' <<< "$matrix")"
+          if [[ "$scenario_count" == "0" ]]; then
+            echo "::error::The $VALIDATION_MODE C++ matrix is empty."
+            exit 1
+          fi
+
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "mode=$VALIDATION_MODE" >> "$GITHUB_OUTPUT"
+          echo "Selected $scenario_count C++ $VALIDATION_MODE scenarios (PR tests: $CPP_TEST_SCOPE)."
+
+  build:
+    name: ${{ matrix.name }}
+    needs: plan
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.timeout_minutes }}
+    strategy:
+      fail-fast: false
+      # Avoid a codeload.github.com burst when every lane prepares the same
+      # pinned Qt setup action at once.
+      max-parallel: 4
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    env:
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/.vcpkg-binary-cache
+      VCPKG_BINARY_SOURCES: "clear;files,${{ github.workspace }}/.vcpkg-binary-cache,readwrite"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Smoke adaptive build parallelism
+        shell: pwsh
+        run: |
+          $python = if ("${{ runner.os }}" -eq "Windows") { "python" } else { "python3" }
+          $selectedText = (& $python tools/dev/fluent_qt_build.py --print-jobs | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) {
+            throw "Adaptive build resource detection failed."
+          }
+          $selectedJobs = 0
+          if (-not [int]::TryParse($selectedText, [ref]$selectedJobs) -or $selectedJobs -lt 1) {
+            throw "Adaptive build returned an invalid job count: '$selectedText'."
+          }
+          Write-Host "Adaptive build selected $selectedJobs job(s) on ${{ runner.os }} ${{ runner.arch }}."
+          & $python tools/dev/fluent_qt_build.py `
+            --jobs auto `
+            --dry-run `
+            --preset "${{ matrix.preset }}" `
+            --target FluentQt
+          if ($LASTEXITCODE -ne 0) {
+            throw "Adaptive build dry-run failed."
+          }
+
+      - name: Verify native ARM64 runner
+        if: ${{ matrix.native_arm64 == true }}
+        shell: pwsh
+        run: |
+          if ("${{ runner.arch }}" -ne "ARM64") {
+            throw "Expected an ARM64 runner, got '${{ runner.arch }}'."
+          }
+
+      - name: Prepare vcpkg binary cache
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+
+      - name: Cache vcpkg binary packages
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .vcpkg-binary-cache
+          key: vcpkg-${{ runner.os }}-${{ runner.arch }}-${{ matrix.vcpkg_triplet }}-${{ hashFiles('vcpkg.json', 'CMakePresets.json') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-${{ runner.arch }}-${{ matrix.vcpkg_triplet }}-
+            vcpkg-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Install Linux system packages
+        if: ${{ runner.os == 'Linux' }}
+        shell: bash
+        run: bash .github/scripts/install-linux-dependencies.sh "${{ matrix.qt_source }}"
+
+      - name: Install NSIS for Windows packaging
+        if: ${{ matrix.windows_package == true }}
+        shell: pwsh
+        run: choco install nsis -y --no-progress
+
+      - name: Install host Qt ${{ matrix.qt_version }}
+        if: ${{ matrix.qt_source == 'aqt' && matrix.windows_arm64_cross == true }}
+        uses: jurplel/install-qt-action@48d3ad6db93f3627c8ee7a0454bc6f3744f7e730 # v4.3.1
+        with:
+          version: ${{ matrix.qt_version }}
+          arch: ${{ matrix.host_qt_arch }}
+          cache: true
+
+      - name: Remember host Qt path
+        if: ${{ matrix.windows_arm64_cross == true }}
+        shell: pwsh
+        run: |
+          $qtHostPath = $env:QT_ROOT_DIR -replace '\\', '/'
+          "QT_HOST_PATH=$qtHostPath" >> $env:GITHUB_ENV
+
+      - name: Install Qt ${{ matrix.qt_version }}
+        if: ${{ matrix.qt_source == 'aqt' && matrix.qt_archives == '' && matrix.windows_arm64_native != true }}
+        uses: jurplel/install-qt-action@48d3ad6db93f3627c8ee7a0454bc6f3744f7e730 # v4.3.1
+        with:
+          version: ${{ matrix.qt_version }}
+          arch: ${{ matrix.qt_arch }}
+          cache: true
+
+      - name: Install native Windows ARM64 Qt ${{ matrix.qt_version }}
+        if: ${{ matrix.qt_source == 'aqt' && matrix.windows_arm64_native == true }}
+        uses: jurplel/install-qt-action@48d3ad6db93f3627c8ee7a0454bc6f3744f7e730 # v4.3.1
+        with:
+          version: ${{ matrix.qt_version }}
+          host: windows_arm64
+          arch: ${{ matrix.qt_arch }}
+          cache: true
+          setup-python: false
+
+      - name: Install Qt ${{ matrix.qt_version }} archives
+        if: ${{ matrix.qt_source == 'aqt' && matrix.qt_archives != '' }}
+        uses: jurplel/install-qt-action@48d3ad6db93f3627c8ee7a0454bc6f3744f7e730 # v4.3.1
+        with:
+          version: ${{ matrix.qt_version }}
+          arch: ${{ matrix.qt_arch }}
+          archives: ${{ matrix.qt_archives }}
+          cache: true
+
+      - name: Configure Linux Qt runtime path
+        if: ${{ runner.os == 'Linux' && matrix.qt_source == 'aqt' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${QT_ROOT_DIR:-}" ]]; then
+            echo "LD_LIBRARY_PATH=${QT_ROOT_DIR}/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+            echo "QT_PLUGIN_PATH=${QT_ROOT_DIR}/plugins" >> "$GITHUB_ENV"
+            echo "QT_QPA_PLATFORM_PLUGIN_PATH=${QT_ROOT_DIR}/plugins/platforms" >> "$GITHUB_ENV"
+          fi
+
+      - name: Set VCPKG_ROOT
+        shell: pwsh
+        run: |
+          if (-not $env:VCPKG_INSTALLATION_ROOT) {
+            throw "VCPKG_INSTALLATION_ROOT is not set on this runner."
+          }
+          "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
+
+      - name: Configure
+        if: ${{ matrix.windows_arm64_cross != true }}
+        shell: pwsh
+        run: |
+          $configureArgs = @("--preset", "${{ matrix.preset }}")
+          if ($env:QT_ROOT_DIR) {
+            $qtRoot = $env:QT_ROOT_DIR -replace '\\', '/'
+            $configureArgs += @("-D", "CMAKE_PREFIX_PATH=$qtRoot")
+          }
+          $extraArgs = "${{ matrix.configure_args }}"
+          if ($extraArgs) {
+            $configureArgs += $extraArgs -split " "
+          }
+          cmake @configureArgs
+
+      - name: Configure Windows ARM64 cross-build
+        if: ${{ matrix.windows_arm64_cross == true }}
+        shell: pwsh
+        run: |
+          $qtRoot = $env:QT_ROOT_DIR -replace '\\', '/'
+          $qtHost = $env:QT_HOST_PATH -replace '\\', '/'
+          $configureArgs = @("--preset", "${{ matrix.preset }}", "-D", "CMAKE_PREFIX_PATH=$qtRoot", "-D", "QT_HOST_PATH=$qtHost")
+          $extraArgs = "${{ matrix.configure_args }}"
+          if ($extraArgs) {
+            $configureArgs += $extraArgs -split " "
+          }
+          cmake @configureArgs
+
+      - name: Validate generated Linux desktop entry
+        if: ${{ runner.os == 'Linux' }}
+        shell: bash
+        run: desktop-file-validate build/${{ matrix.preset }}/app/*.desktop
+
+      - name: Build
+        if: ${{ matrix.build == true }}
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: ${{ matrix.qt_qpa_platform || 'offscreen' }}
+          SKIP_VISUAL_TEST: 1
+          ASAN_OPTIONS: ${{ matrix.asan_options || '' }}
+          UBSAN_OPTIONS: ${{ matrix.ubsan_options || '' }}
+        run: |
+          $buildArgs = @("--build", "--preset", "${{ matrix.preset }}")
+          $buildTargets = "${{ matrix.build_targets }}"
+          if ($buildTargets) {
+            $buildArgs += "--target"
+            $buildArgs += $buildTargets -split " "
+          }
+          $buildParallel = "${{ matrix.build_parallel }}"
+          if ($buildParallel) {
+            $buildArgs += @("--parallel", $buildParallel)
+          } else {
+            $buildArgs += "--parallel"
+          }
+          cmake @buildArgs
+
+      - name: Verify relocatable macOS CMake package
+        if: ${{ matrix.id == 'mac-arm64-qt62-build' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          original_prefix="$RUNNER_TEMP/fluentqt-original"
+          relocated_prefix="$RUNNER_TEMP/fluentqt-relocated"
+          consumer_build="$RUNNER_TEMP/fluentqt-relocated-consumer"
+
+          cmake --install "build/${{ matrix.preset }}" \
+            --config Debug \
+            --component Development \
+            --prefix "$original_prefix"
+
+          package_dir="$original_prefix/lib/cmake/FluentQt"
+          test -f "$package_dir/FluentQtApplePlatformDependencies.cmake"
+          if grep -R -F \
+            -e "$GITHUB_WORKSPACE" \
+            -e "$RUNNER_TEMP" \
+            -e "$QT_ROOT_DIR" \
+            -e "/Applications/Xcode.app" \
+            "$package_dir"; then
+            echo "::error::Build-machine path leaked into the FluentQt CMake package."
+            exit 1
+          fi
+          if grep -R -E 'MacOSX[^/]*\.sdk' "$package_dir"; then
+            echo "::error::Apple SDK path leaked into the FluentQt CMake package."
+            exit 1
+          fi
+
+          mv "$original_prefix" "$relocated_prefix"
+          cmake \
+            -S .github/integration \
+            -B "$consumer_build" \
+            -DFLUENT_QT_INTEGRATION_MODE=INSTALLED \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_PREFIX_PATH="$relocated_prefix;$QT_ROOT_DIR"
+          cmake --build "$consumer_build" --parallel 4
+
+      - name: Smoke launch native Windows ARM64 Gallery
+        if: ${{ matrix.windows_arm64_native == true && matrix.gallery_smoke == true }}
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: windows
+          SKIP_VISUAL_TEST: 1
+        run: |
+          $gallery = Get-ChildItem -Path "build/${{ matrix.preset }}/app" -Recurse -Filter fluent_qt_gallery.exe |
+            Select-Object -First 1
+          if (-not $gallery) {
+            throw "The Windows ARM64 Gallery executable was not found."
+          }
+
+          $process = $null
+          try {
+            $process = Start-Process -FilePath $gallery.FullName -PassThru
+            Start-Sleep -Seconds 5
+            if ($process.HasExited) {
+              throw "The Windows ARM64 Gallery exited during smoke launch with code $($process.ExitCode)."
+            }
+          } finally {
+            if ($process -and -not $process.HasExited) {
+              Stop-Process -Id $process.Id -Force
+            }
+          }
+
+      - name: Smoke launch native Linux ARM64 Gallery with X11
+        if: ${{ matrix.linux_xcb_smoke == true }}
+        shell: bash
+        env:
+          QT_QPA_PLATFORM: xcb
+          SKIP_VISUAL_TEST: 1
+        run: |
+          set -euo pipefail
+          gallery="build/${{ matrix.preset }}/app/fluent_qt_gallery"
+          if [[ ! -x "$gallery" ]]; then
+            echo "::error::The Linux ARM64 Gallery executable was not found: $gallery"
+            exit 1
+          fi
+
+          xvfb-run -a sh -c '
+            "$1" &
+            pid=$!
+            trap "kill $pid 2>/dev/null || true" EXIT
+            sleep 5
+            kill -0 "$pid"
+          ' sh "$gallery"
+
+      - name: Test
+        if: ${{ matrix.build == true && matrix.test == true }}
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: ${{ matrix.qt_qpa_platform || 'offscreen' }}
+          SKIP_VISUAL_TEST: 1
+          ASAN_OPTIONS: ${{ matrix.asan_options || '' }}
+          UBSAN_OPTIONS: ${{ matrix.ubsan_options || '' }}
+        run: |
+          $testArgs = @(
+            "--preset", "${{ matrix.preset }}",
+            "--output-on-failure",
+            "--timeout", "${{ matrix.ctest_timeout }}",
+            "--no-tests=error"
+          )
+          $testLabels = "${{ matrix.test_labels }}"
+          $excludeLabels = "${{ matrix.exclude_labels }}"
+          if ($testLabels) {
+            $testArgs += @("-L", $testLabels)
+          }
+          if ($excludeLabels) {
+            $testArgs += @("-LE", $excludeLabels)
+          }
+          ctest @testArgs
+
+      - name: Configure Linux Gallery package
+        if: ${{ matrix.package == true }}
+        shell: bash
+        run: cmake --preset "${{ matrix.package_build_preset }}"
+
+      - name: Build Linux Gallery package
+        if: ${{ matrix.package == true }}
+        shell: bash
+        run: cmake --build --preset "${{ matrix.package_build_preset }}" --target fluent_qt_gallery --parallel 4
+
+      - name: Package Linux Gallery
+        if: ${{ matrix.package == true }}
+        shell: bash
+        run: cpack --preset "${{ matrix.package_preset }}"
+
+      - name: Verify Linux Gallery package metadata
+        if: ${{ matrix.package == true }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          packages=(build/${{ matrix.package_build_preset }}/*.deb)
+          if (( ${#packages[@]} != 1 )); then
+            echo "::error::Expected exactly one DEB package, found ${#packages[@]}."
+            exit 1
+          fi
+
+          dpkg-deb --field "${packages[0]}" Architecture Depends Recommends
+          depends="$(dpkg-deb --field "${packages[0]}" Depends)"
+          if [[ "$depends" != *qt6-qpa-plugins* ]]; then
+            echo "::error::The DEB package does not depend on qt6-qpa-plugins."
+            exit 1
+          fi
+
+      - name: Upload Linux Gallery package
+        if: ${{ matrix.package == true }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fluent-qt-gallery-linux-${{ matrix.package_arch }}-deb
+          retention-days: 14
+          path: |
+            build/${{ matrix.package_build_preset }}/*.deb
+          if-no-files-found: error
+
+      - name: Package Windows ARM64 Gallery
+        if: ${{ matrix.windows_package == true }}
+        shell: pwsh
+        run: |
+          # Keep CPack's NSIS staging tree short. Qt's nested runtime paths can
+          # otherwise exceed the legacy path limit used by makensis.
+          $packageOutput = Join-Path $env:RUNNER_TEMP "fq-win-arm64"
+          & cpack --preset "${{ matrix.package_preset }}" -B $packageOutput
+          $exitCode = $LASTEXITCODE
+          if ($exitCode -ne 0) {
+            Get-ChildItem -LiteralPath $packageOutput -Filter NSISOutput.log -Recurse `
+              -ErrorAction SilentlyContinue |
+              ForEach-Object { Get-Content -LiteralPath $_.FullName }
+            exit $exitCode
+          }
+
+          $stagedGallery = Get-ChildItem `
+            -LiteralPath (Join-Path $packageOutput "_CPack_Packages") `
+            -Filter fluent_qt_gallery.exe -File -Recurse |
+            Where-Object { $_.Directory.Name -eq "bin" } |
+            Select-Object -First 1
+          if (-not $stagedGallery) {
+            throw "The staged Windows ARM64 Gallery executable was not found."
+          }
+          & "$env:GITHUB_WORKSPACE/cmake/VerifyWindowsPeArchitecture.ps1" `
+            -Root $stagedGallery.Directory.FullName `
+            -ExpectedMachine Arm64 `
+            -RequireMsvcRuntime
+
+      - name: Upload Windows ARM64 Gallery installer
+        if: ${{ matrix.windows_package == true }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fluent-qt-gallery-windows-arm64-installer
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}/fq-win-arm64/*.exe
+          if-no-files-found: error
+
+      - name: Record installed C++ first-window trial
+        if: ${{ matrix.first_window_trial == true }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          $installPrefix = Join-Path `
+            $env:RUNNER_TEMP `
+            "fluentqt-first-window-install"
+          cmake --install "build/${{ matrix.preset }}" `
+            --config Debug `
+            --component Development `
+            --prefix $installPrefix
+
+          $prefixParts = @(($installPrefix -replace '\\', '/'))
+          if ($env:QT_ROOT_DIR) {
+            $prefixParts += ($env:QT_ROOT_DIR -replace '\\', '/')
+          }
+          $prefixPath = $prefixParts -join ";"
+          $launcher = Join-Path `
+            $installPrefix `
+            "share/doc/FluentQt/tools/onboarding/fluentqt"
+          $report = Join-Path `
+            $env:RUNNER_TEMP `
+            "fluentqt-first-window-cpp.json"
+          $parallel = "${{ matrix.build_parallel }}"
+          if (-not $parallel) {
+            $parallel = "4"
+          }
+
+          python $launcher trial `
+            --profile cpp `
+            --starter workbench `
+            --cmake-prefix-path $prefixPath `
+            --config Debug `
+            --parallel $parallel `
+            --timeout-seconds 600 `
+            --output $report
+
+      - name: Upload C++ first-window report
+        if: ${{ always() && matrix.first_window_trial == true }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fluentqt-first-window-${{ needs.plan.outputs.mode }}-${{ matrix.id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fluentqt-first-window-cpp.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-${{ needs.plan.outputs.mode }}-${{ matrix.id }}-diagnostics-${{ github.run_attempt }}
+          if-no-files-found: ignore
+          retention-days: 7
+          path: |
+            build/${{ matrix.preset }}/CMakeCache.txt
+            build/${{ matrix.preset }}/CMakeFiles/CMakeConfigureLog.yaml
+            build/${{ matrix.preset }}/Testing/Temporary/LastTest.log
+            build/${{ matrix.preset }}/Testing/Temporary/LastTestsFailed.log
+            build/${{ matrix.preset }}/vcpkg-manifest-install.log
+            build/${{ matrix.package_build_preset }}/CMakeCache.txt
+            build/${{ matrix.package_build_preset }}/_CPack_Packages/**/*.log
+            ${{ runner.temp }}/fq-win-arm64/_CPack_Packages/**/*.log
+            build/${{ matrix.preset }}/vcpkg_installed/vcpkg/issue_body.md
+
+  integration:
+    name: Library integration ${{ matrix.name }}
+    needs: plan
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Qt 5.15
+            qt_source: apt5
+          - name: Qt 6.2
+            qt_source: apt6
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Install Qt and build tools
+        shell: bash
+        run: bash .github/scripts/install-linux-dependencies.sh "${{ matrix.qt_source }}"
+
+      - name: Configure external source-subproject integration
+        shell: bash
+        run: |
+          cmake -S .github/integration -B build/integration-source \
+            -DFLUENT_QT_SOURCE_DIR="$GITHUB_WORKSPACE" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_DISABLE_FIND_PACKAGE_spdlog=TRUE \
+            -DCMAKE_DISABLE_FIND_PACKAGE_GTest=TRUE
+
+      - name: Build external source-subproject integration
+        shell: bash
+        run: cmake --build build/integration-source --parallel 4
+
+      - name: Configure FetchContent integration
+        shell: bash
+        run: |
+          cmake -S .github/integration -B build/integration-fetchcontent \
+            -DFLUENT_QT_INTEGRATION_MODE=FETCHCONTENT \
+            -DFLUENT_QT_SOURCE_DIR="$GITHUB_WORKSPACE" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_DISABLE_FIND_PACKAGE_spdlog=TRUE \
+            -DCMAKE_DISABLE_FIND_PACKAGE_GTest=TRUE
+
+      - name: Build FetchContent integration
+        shell: bash
+        run: cmake --build build/integration-fetchcontent --parallel 4
+
+      - name: Install FluentQt development component
+        shell: bash
+        run: |
+          cmake --install build/integration-source \
+            --config Release \
+            --component Development \
+            --prefix "$RUNNER_TEMP/fluentqt"
+
+      - name: Verify installed onboarding command
+        shell: bash
+        run: |
+          command="$RUNNER_TEMP/fluentqt/share/doc/FluentQt/tools/onboarding/fluentqt"
+          test -x "$command"
+          "$command" --help
+
+      - name: Verify library-only CMake package
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_dir="$RUNNER_TEMP/fluentqt/lib/cmake/FluentQt"
+          test -f "$package_dir/FluentQtConfig.cmake"
+          test -f "$package_dir/FluentQtTargets.cmake"
+          test -f "$RUNNER_TEMP/fluentqt/include/FluentQt/Diagnostics.h"
+          test -f "$RUNNER_TEMP/fluentqt/include/FluentQt/utils/Inspector.h"
+          if grep -R -E 'spdlog|fmt::|GTest|FluentQtLoggingSupport|support/logging' "$package_dir"; then
+            echo "::error::Gallery or test dependencies leaked into the FluentQt package."
+            exit 1
+          fi
+          for header in \
+            components/foundation/private/FluentElement_p.h \
+            compatibility/private/WindowBackdropEvents_p.h \
+            utils/private/Inspector_p.h \
+            utils/private/FluentQtLogging_p.h \
+            utils/private/FluentQtResources_p.h; do
+            if [[ -e "$RUNNER_TEMP/fluentqt/include/FluentQt/$header" ]]; then
+              echo "::error::Internal header leaked into the FluentQt package: $header"
+              exit 1
+            fi
+          done
+
+      - name: Configure installed-package integration
+        shell: bash
+        run: |
+          cmake -S .github/integration -B build/integration-installed \
+            -DFLUENT_QT_INTEGRATION_MODE=INSTALLED \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/fluentqt" \
+            -DCMAKE_DISABLE_FIND_PACKAGE_spdlog=TRUE \
+            -DCMAKE_DISABLE_FIND_PACKAGE_GTest=TRUE
+
+      - name: Build installed-package integration
+        shell: bash
+        run: cmake --build build/integration-installed --parallel 4
+
+      - name: Verify FluentQt library source package
+        if: ${{ matrix.qt_source == 'apt6' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="$RUNNER_TEMP/source-package"
+          cmake \
+            -D "FLUENT_QT_SOURCE_DIR=$GITHUB_WORKSPACE" \
+            -D "FLUENT_QT_SOURCE_PACKAGE_DIR=$output" \
+            -D "FLUENT_QT_SOURCE_PACKAGE_VERSION=ci" \
+            -P cmake/CreateSourcePackage.cmake
+          archive="$output/FluentQt-ci-source.zip"
+          test -f "$archive"
+          if unzip -Z1 "$archive" | grep -E '^[^/]+/(app|tests|support)/'; then
+            echo "::error::Non-library files leaked into the FluentQt source package."
+            exit 1
+          fi
+          if unzip -Z1 "$archive" | grep -E \
+              '^[^/]+/bindings/pyside6/gallery/'; then
+            echo "::error::The standalone Python Gallery leaked into the library source package."
+            exit 1
+          fi
+          archive_entries="$(unzip -Z1 "$archive")"
+          for source_file in \
+              .agents/skills/build-fluentqt-gui/SKILL.md \
+              .agents/skills/build-fluentqt-gui/LICENSE.txt \
+              .agents/skills/build-fluentqt-gui/agents/openai.yaml \
+              .agents/skills/build-fluentqt-gui/assets/benchmarks/agent-run.schema.json \
+              .agents/skills/build-fluentqt-gui/assets/benchmarks/agent-run-workspace.json \
+              .agents/skills/build-fluentqt-gui/assets/composition-recipes.json \
+              .agents/skills/build-fluentqt-gui/assets/fluentqt-ai-catalog.json \
+              .agents/skills/build-fluentqt-gui/assets/project-structure-templates.json \
+              .agents/skills/build-fluentqt-gui/references/art-direction.md \
+              .agents/skills/build-fluentqt-gui/references/component-selection.md \
+              .agents/skills/build-fluentqt-gui/references/cross-agent-benchmark.md \
+              .agents/skills/build-fluentqt-gui/references/design-intelligence.md \
+              .agents/skills/build-fluentqt-gui/references/experience-differentiation.md \
+              .agents/skills/build-fluentqt-gui/references/fluentqt-maintainer-gates.md \
+              .agents/skills/build-fluentqt-gui/references/iconography.md \
+              .agents/skills/build-fluentqt-gui/references/performance-lifecycle.md \
+              .agents/skills/build-fluentqt-gui/references/polished-starter.md \
+              .agents/skills/build-fluentqt-gui/references/premium-shell.md \
+              .agents/skills/build-fluentqt-gui/references/product-reference-patterns.md \
+              .agents/skills/build-fluentqt-gui/references/project-architecture.md \
+              .agents/skills/build-fluentqt-gui/references/product-copy.md \
+              .agents/skills/build-fluentqt-gui/references/signature-surface.md \
+              .agents/skills/build-fluentqt-gui/references/theme-system.md \
+              .agents/skills/build-fluentqt-gui/references/visual-evidence-contract.md \
+              .agents/skills/build-fluentqt-gui/references/visual-refinement.md \
+              .agents/skills/build-fluentqt-gui/scripts/benchmark_run.py \
+              .agents/skills/build-fluentqt-gui/scripts/init_design_brief.py \
+              .agents/skills/build-fluentqt-gui/scripts/init_project_structure.py \
+              .agents/skills/build-fluentqt-gui/scripts/init_visual_evidence.py \
+              .agents/skills/build-fluentqt-gui/scripts/query_catalog.py \
+              .agents/skills/build-fluentqt-gui/scripts/render_design_board.py \
+              .agents/skills/build-fluentqt-gui/scripts/render_visual_review.py \
+              .agents/skills/build-fluentqt-gui/scripts/validate_design_brief.py \
+              .agents/skills/build-fluentqt-gui/scripts/validate_project_structure.py \
+              .agents/skills/build-fluentqt-gui/scripts/validate_visual_evidence.py \
+              .github/scripts/setup-shiboken-clang.py \
+              bindings/README.md \
+              bindings/pyside6/api-manifest.json \
+              bindings/pyside6/CMakeLists.txt \
+              bindings/pyside6/cmake/FluentQtPySide6Gallery.cmake \
+              bindings/pyside6/API_COMPATIBILITY.md \
+              bindings/pyside6/MANYLINUX.md \
+              bindings/pyside6/PYPI.md \
+              bindings/pyside6/ROADMAP.md \
+              bindings/pyside6/examples/accordion_ownership.py \
+              bindings/pyside6/examples/auto_suggest_box.py \
+              bindings/pyside6/examples/breadcrumb_navigation.py \
+              bindings/pyside6/examples/combo_box_dropdown.py \
+              bindings/pyside6/examples/command_surfaces.py \
+              bindings/pyside6/examples/date_time_pickers.py \
+              bindings/pyside6/examples/menu_buttons.py \
+              bindings/pyside6/examples/compatibility_showcase.py \
+              bindings/pyside6/examples/content_dialog.py \
+              bindings/pyside6/examples/drawer_view_ownership.py \
+              bindings/pyside6/examples/flip_view_ownership.py \
+              bindings/pyside6/examples/flyout_overlay.py \
+              bindings/pyside6/examples/flow_view_model.py \
+              bindings/pyside6/examples/grid_view_model.py \
+              bindings/pyside6/examples/guidance_overlays.py \
+              bindings/pyside6/examples/list_view_model.py \
+              bindings/pyside6/examples/navigation_view_ownership.py \
+              bindings/pyside6/examples/popup_overlay.py \
+              bindings/pyside6/examples/split_view_ownership.py \
+              bindings/pyside6/examples/tree_view_model.py \
+              bindings/pyside6/examples/scroll_view_ownership.py \
+              bindings/pyside6/examples/selector_pivot_navigation.py \
+              bindings/pyside6/examples/stack_view_navigation.py \
+              bindings/pyside6/examples/status_overlays.py \
+              bindings/pyside6/examples/tab_view_navigation.py \
+              bindings/pyside6/examples/window_chrome.py \
+              bindings/pyside6/native/WindowsBindingPrelude.h \
+              bindings/pyside6/native/typesystem_fluentqt.xml \
+              bindings/pyside6/src/fluentqt/__init__.py \
+              bindings/pyside6/src/fluentqt/basicinput.py \
+              bindings/pyside6/src/fluentqt/collections.py \
+              bindings/pyside6/src/fluentqt/date_time.py \
+              bindings/pyside6/src/fluentqt/design.py \
+              bindings/pyside6/src/fluentqt/dialogs_flyouts.py \
+              bindings/pyside6/src/fluentqt/foundation.py \
+              bindings/pyside6/src/fluentqt/layout.py \
+              bindings/pyside6/src/fluentqt/menus_toolbars.py \
+              bindings/pyside6/src/fluentqt/navigation.py \
+              bindings/pyside6/src/fluentqt/scrolling.py \
+              bindings/pyside6/src/fluentqt/status_info.py \
+              bindings/pyside6/src/fluentqt/textfields.py \
+              bindings/pyside6/src/fluentqt/windowing.py \
+              bindings/pyside6/src/fluentqt/py.typed \
+              bindings/pyside6/tests/test_generated_contract_verifier.py \
+              bindings/pyside6/tests/test_api_policy.py \
+              bindings/pyside6/tests/test_manylinux_wheel.py \
+              bindings/pyside6/tests/test_stub_generator.py \
+              bindings/pyside6/tests/test_typecheck_smoke.py \
+              bindings/pyside6/tests/test_wheel_builder.py \
+              bindings/pyside6/tests/test_wheel_smoke.py \
+              bindings/pyside6/tools/build_wheel.py \
+              bindings/pyside6/tools/build_manylinux_wheel.sh \
+              bindings/pyside6/tools/generate_stubs.py \
+              bindings/pyside6/tools/repair_manylinux_wheel.py \
+              bindings/pyside6/tools/verify_api_policy.py \
+              bindings/pyside6/tools/verify_generated_contracts.py \
+              bindings/pyside6/tools/verify_stubs.py \
+              bindings/pyside6/wheel-matrix.json \
+              docs/ai/README.md \
+              docs/ai/add-gui-to-project.md \
+              docs/ai/evals/application-scenes.json \
+              docs/ai/evals/application-scenes.schema.json \
+              docs/ai/evals/scenarios.json \
+              docs/ai/evals/scenarios.schema.json \
+              docs/ai/fluentqt-ai-catalog.schema.json \
+              docs/ai/generated/fluentqt-ai-catalog.json \
+              docs/ai/guidance.json \
+              docs/ai/project-analysis.schema.json \
+              include/FluentQt/Diagnostics.h \
+              llms.txt \
+              src/utils/Inspector.h \
+              tools/ai/evaluate_ai_catalog.py \
+              tools/ai/package_fluentqt_skill.py \
+              tools/ai/query_ai_catalog.py \
+              tools/onboarding/README.md \
+              tools/onboarding/create-report.schema.json \
+              tools/onboarding/doctor-report.schema.json \
+              tools/onboarding/first-window-report.schema.json \
+              tools/onboarding/fluentqt \
+              tools/onboarding/fluentqt_create.py \
+              tools/onboarding/fluentqt_doctor.py \
+              tools/onboarding/fluentqt_trial.py \
+              tools/onboarding/qt_widgets_probe/CMakeLists.txt \
+              tools/onboarding/starters/manifest.json \
+              tools/onboarding/test_fluentqt_create.py \
+              tools/onboarding/test_fluentqt_doctor.py \
+              tools/onboarding/test_fluentqt_trial.py \
+              tools/fonts/fluent_icon_aliases.json; do
+            if ! grep -x "FluentQt-ci-source/$source_file" \
+                <<< "$archive_entries" > /dev/null; then
+              echo "::error::Missing source-package file: $source_file"
+              exit 1
+            fi
+          done
+          unzip -q "$archive" -d "$output/unpacked"
+          test -x \
+            "$output/unpacked/FluentQt-ci-source/tools/onboarding/fluentqt"
+          python3 \
+            "$output/unpacked/FluentQt-ci-source/tools/ai/query_ai_catalog.py" \
+            --component tree-view > /dev/null
+          python3 \
+            "$output/unpacked/FluentQt-ci-source/tools/ai/package_fluentqt_skill.py" \
+            --project-root "$output/unpacked/FluentQt-ci-source" \
+            --output-dir "$output/skill-dist" \
+            --version ci > /dev/null
+          skill_archive="$output/skill-dist/build-fluentqt-gui-ci.zip"
+          test -f "$skill_archive"
+          unzip -q "$skill_archive" -d "$output/skill-installed"
+          python3 \
+            "$output/skill-installed/build-fluentqt-gui/scripts/query_catalog.py" \
+            --component field > /dev/null
+          python3 \
+            "$output/unpacked/FluentQt-ci-source/tools/ai/evaluate_ai_catalog.py" \
+            --project-root "$output/unpacked/FluentQt-ci-source"
+          python3 \
+            "$output/unpacked/FluentQt-ci-source/tools/onboarding/test_fluentqt_doctor.py"
+          python3 \
+            "$output/unpacked/FluentQt-ci-source/tools/onboarding/test_fluentqt_create.py"
+          python3 \
+            "$output/unpacked/FluentQt-ci-source/tools/onboarding/test_fluentqt_trial.py"
+          cmake -S .github/integration -B build/integration-source-package \
+            -DFLUENT_QT_SOURCE_DIR="$output/unpacked/FluentQt-ci-source" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_DISABLE_FIND_PACKAGE_spdlog=TRUE \
+            -DCMAKE_DISABLE_FIND_PACKAGE_GTest=TRUE
+          cmake --build build/integration-source-package --parallel 4
+
+      - name: Record installed C++ first-window trial
+        shell: bash
+        run: |
+          set -euo pipefail
+          command="$RUNNER_TEMP/fluentqt/share/doc/FluentQt/tools/onboarding/fluentqt"
+          "$command" trial \
+            --profile cpp \
+            --starter workbench \
+            --cmake-prefix-path "$RUNNER_TEMP/fluentqt" \
+            --config Release \
+            --parallel 4 \
+            --timeout-seconds 600 \
+            --output "$RUNNER_TEMP/fluentqt-first-window-integration.json"
+
+      - name: Upload integration first-window report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fluentqt-first-window-integration-${{ matrix.qt_source }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fluentqt-first-window-integration.json
+          if-no-files-found: warn
+          retention-days: 14

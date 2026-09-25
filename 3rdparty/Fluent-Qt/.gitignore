@@ -1,0 +1,30 @@
+# Vs workspace files
+*.vs
+
+# binary files
+build/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv*/
+.pytest_cache/
+*.egg-info/
+.coverage
+coverage.xml
+htmlcov/
+
+# CMake tooling
+compile_commands.json
+
+# custom user files
+*.user
+CMakeUserPresets.json
+.vscode/settings.json
+.qtcreator/
+
+# mac
+.DS_Store
+
+# codex
+tmp/

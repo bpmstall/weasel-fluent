@@ -1,0 +1,31 @@
+# @APP_NAME@
+
+PySide6 workbench with a responsive shell, a balanced full-height workspace
+page, native FluentQt components, and explicit product boundaries.
+
+```bash
+python -m venv .venv
+python -m pip install -e .
+python -m unittest discover -s tests
+@APP_ID@
+```
+
+The app package composes dependencies. Domain and application modules remain
+independent of Qt, infrastructure owns external state, and UI modules only
+render application state and publish user intent.
+
+`ui/components/workbench_shell.py` owns wide/narrow shell geometry. Replace the
+sample `ui/pages/workspace_page.py` with the product's primary workflow; keep
+the centered width, material gaps, and responsive rail until the approved
+design direction gives a concrete reason to change them.
+
+## Quality report
+
+After the window builds successfully, emit the same native Inspector report as
+the C++ starter:
+
+```bash
+@APP_ID@ --quality-report
+```
+
+The command prints versioned JSON and exits. It does not change the interface.

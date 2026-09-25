@@ -1,0 +1,187 @@
+#ifndef TEXTEDIT_H
+#define TEXTEDIT_H
+
+#include <QMargins>
+#include <QWidget>
+#include <QString>
+#include "components/foundation/FluentElement.h"
+#include "components/foundation/QMLPlus.h"
+#include "design/Spacing.h"
+#include "design/Typography.h"
+
+class QTextEdit;
+class QPainter;
+class QPaintEvent;
+
+namespace fluent::scrolling { class ScrollBar; }
+
+namespace fluent::textfields {
+
+/**
+ * @brief Fluent multi-line text input with line-count based sizing.
+ * zh_CN: 支持按可见行数计算尺寸的 Fluent 多行文本输入框。
+ *
+ * TextEdit hosts QTextEdit-style editing while exposing Fluent frame, typography,
+ * content margins, focused border, and min/max visible line metrics.
+ * zh_CN: TextEdit 承载 QTextEdit 式编辑，并暴露 Fluent 外框、排版、内容边距、
+ * 聚焦边线以及最小/最大可见行数参数。
+ */
+class TextEdit : public QWidget, public FluentElement, public QMLPlus {
+    Q_OBJECT
+    /**
+     * @brief Minimum insets around the editable text; vertical values share
+     *        the line slot and expand the control only when they overflow it.
+     * zh_CN: 可编辑文本周围的最小内边距；垂直值优先包含在行槽中，仅在超出时扩展控件。
+     */
+    Q_PROPERTY(QMargins contentMargins READ contentMargins WRITE setContentMargins NOTIFY contentMarginsChanged)
+    /**
+     * @brief Fluent typography role used for text rendering.
+     * zh_CN: 文本绘制使用的 Fluent 排版角色。
+     */
+    Q_PROPERTY(Typography::FontRole fontRole READ fontRole WRITE setFontRole NOTIFY fontRoleChanged)
+    /**
+     * @brief Bottom border width while focused.
+     * zh_CN: 聚焦时底部边框宽度。
+     */
+    Q_PROPERTY(int focusedBorderWidth READ focusedBorderWidth WRITE setFocusedBorderWidth NOTIFY focusedBorderWidthChanged)
+    /**
+     * @brief Bottom border width while not focused.
+     * zh_CN: 未聚焦时底部边框宽度。
+     */
+    Q_PROPERTY(int unfocusedBorderWidth READ unfocusedBorderWidth WRITE setUnfocusedBorderWidth NOTIFY unfocusedBorderWidthChanged)
+    /**
+     * @brief Visual line slot height used by the text editor.
+     * zh_CN: 文本编辑器使用的视觉行槽高度。
+     */
+    Q_PROPERTY(int lineHeight READ lineHeight WRITE setLineHeight NOTIFY layoutMetricsChanged)
+    /**
+     * @brief Minimum visible lines; raising it above the maximum raises both.
+     * zh_CN: 最少可见文本行数；设置值高于最大值时会同步提高两者。
+     */
+    Q_PROPERTY(int minVisibleLines READ minVisibleLines WRITE setMinVisibleLines NOTIFY layoutMetricsChanged)
+    /**
+     * @brief Maximum visible lines; lowering it below the minimum lowers both.
+     * zh_CN: 滚动前最多可见文本行数；设置值低于最小值时会同步降低两者。
+     */
+    Q_PROPERTY(int maxVisibleLines READ maxVisibleLines WRITE setMaxVisibleLines NOTIFY layoutMetricsChanged)
+    /**
+     * @brief Whether Tab advances focus instead of inserting a tab character.
+     * zh_CN: Tab 键是否移动焦点而不是插入制表符。
+     */
+    Q_PROPERTY(bool tabChangesFocus READ tabChangesFocus WRITE setTabChangesFocus NOTIFY tabChangesFocusChanged)
+    /**
+     * @brief Whether boundary wheel input may continue to an enclosing scroller.
+     * zh_CN: 边界滚轮输入是否允许继续传递给外层滚动容器。
+     */
+    Q_PROPERTY(bool scrollChainingEnabled READ isScrollChainingEnabled WRITE setScrollChainingEnabled NOTIFY scrollChainingEnabledChanged)
+
+public:
+    explicit TextEdit(QWidget* parent = nullptr);
+
+    // Text APIs. zh_CN: 文本相关 API。
+    void setPlainText(const QString& text);
+    QString toPlainText() const;
+    void clear();
+
+    void setPlaceholderText(const QString& text);
+    QString placeholderText() const;
+
+    void setReadOnly(bool readOnly);
+    bool isReadOnly() const;
+
+    ::fluent::scrolling::ScrollBar* verticalScrollBar() const;
+
+    void setFocus();
+    void setFocus(Qt::FocusReason reason);
+
+    void onThemeUpdated() override;
+
+    QMargins contentMargins() const { return m_contentMargins; }
+    void setContentMargins(const QMargins& margins);
+
+    Typography::FontRole fontRole() const { return m_fontRole; }
+    void setFontRole(Typography::FontRole role);
+
+    int focusedBorderWidth() const { return m_focusedBorderWidth; }
+    void setFocusedBorderWidth(int width);
+
+    int unfocusedBorderWidth() const { return m_unfocusedBorderWidth; }
+    void setUnfocusedBorderWidth(int width);
+
+    int lineHeight() const { return m_lineHeight; }
+    void setLineHeight(int height);
+
+    int minVisibleLines() const { return m_minVisibleLines; }
+    void setMinVisibleLines(int lines);
+
+    int maxVisibleLines() const { return m_maxVisibleLines; }
+    void setMaxVisibleLines(int lines);
+
+    bool tabChangesFocus() const { return m_tabChangesFocus; }
+    void setTabChangesFocus(bool enabled);
+
+    bool isScrollChainingEnabled() const { return m_scrollChainingEnabled; }
+    void setScrollChainingEnabled(bool enabled);
+
+signals:
+    void textChanged();
+    void cursorPositionChanged();
+    void selectionChanged();
+    void contentMarginsChanged();
+    void fontRoleChanged();
+    void focusedBorderWidthChanged();
+    void unfocusedBorderWidthChanged();
+    void layoutMetricsChanged();
+    void tabChangesFocusChanged();
+    void scrollChainingEnabledChanged();
+
+protected:
+    void paintEvent(QPaintEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
+    void enterEvent(FluentEnterEvent* event) override;
+    void leaveEvent(QEvent* event) override;
+    void focusInEvent(QFocusEvent* event) override;
+    void focusOutEvent(QFocusEvent* event) override;
+    bool eventFilter(QObject* obj, QEvent* event) override;
+
+private:
+    void applyEditorPalette();
+    void applyThemeStyle();
+    void paintFrame(QPainter& painter);
+    void scheduleHeightForContentUpdate();
+    void updateHeightForContent();
+
+    /**
+     * @brief Applies requested text insets, remaining vertical centering, and
+     *        viewport margins.
+     * zh_CN: 应用文本内边距、剩余垂直居中空间及 viewport margin。
+     */
+    void applyBlockCenterFormat();
+
+    QTextEdit*                    m_editor      = nullptr;
+    ::fluent::scrolling::ScrollBar* m_vScrollBar  = nullptr;
+    bool m_updatingFormat = false;
+    bool m_updatingHeight = false;
+    bool m_heightUpdateScheduled = false;
+    bool m_scrollEnabled  = false;
+
+    QMargins m_contentMargins   = QMargins(::Spacing::Padding::TextFieldHorizontal,
+                                           ::Spacing::Padding::TextFieldVertical,
+                                           ::Spacing::Padding::TextFieldHorizontal,
+                                           ::Spacing::Padding::TextFieldVertical);
+    Typography::FontRole m_fontRole = Typography::FontRole::Body;
+    bool     m_isHovered        = false;
+    bool     m_isFocused        = false;
+    int      m_focusedBorderWidth   = ::Spacing::Border::Focused;
+    int      m_unfocusedBorderWidth = ::Spacing::Border::Normal;
+    int      m_lineHeight           = ::Spacing::ControlHeight::Standard;
+    int      m_minVisibleLines      = 1;
+    int      m_maxVisibleLines      = 4;
+    bool     m_tabChangesFocus      = false;
+    bool     m_scrollChainingEnabled = false;
+    QString  m_placeholderText;
+};
+
+} // namespace fluent::textfields
+
+#endif // TEXTEDIT_H

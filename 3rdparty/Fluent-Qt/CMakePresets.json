@@ -1,0 +1,470 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 25,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "vcpkg-base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "BUILD_TESTING": "ON",
+        "FLUENT_QT_BUILD_EXAMPLES": "ON",
+        "FLUENT_QT_BUILD_GALLERY": "ON",
+        "FLUENT_QT_BUILD_TESTS": "ON",
+        "VCPKG_MANIFEST_FEATURES": "gallery;tests"
+      }
+    },
+    {
+      "name": "wasm",
+      "displayName": "Qt 6.9 WebAssembly single-threaded Release",
+      "description": "Browser build using QT_WASM_ROOT and QT_HOST_ROOT; no vcpkg dependencies are used.",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "generator": "Ninja",
+      "toolchainFile": "$env{QT_WASM_ROOT}/lib/cmake/Qt6/qt.toolchain.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "QT_HOST_PATH": "$env{QT_HOST_ROOT}",
+        "BUILD_TESTING": "OFF",
+        "FLUENT_QT_BUILD_EXAMPLES": "ON",
+        "FLUENT_QT_BUILD_GALLERY": "ON",
+        "FLUENT_QT_BUILD_TESTS": "OFF",
+        "FLUENT_QT_BUILD_PYSIDE6_BINDINGS": "OFF",
+        "FLUENT_QT_BUILD_WEBASSEMBLY_SUPPORT": "ON",
+        "FLUENT_QT_INSTALL": "ON",
+        "FLUENT_QT_ENABLE_GALLERY_PACKAGING": "OFF"
+      }
+    },
+    {
+      "name": "vcpkg-osx",
+      "displayName": "vcpkg macOS arm64 Debug",
+      "description": "Apple Silicon build using vcpkg manifest dependencies. Qt is discovered from the local Qt installation.",
+      "inherits": "vcpkg-base",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      },
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "arm64-osx",
+        "CMAKE_OSX_ARCHITECTURES": "arm64"
+      }
+    },
+    {
+      "name": "vcpkg-osx-release",
+      "displayName": "vcpkg macOS arm64 Release",
+      "description": "Apple Silicon release build used for DMG packaging.",
+      "inherits": "vcpkg-osx",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BUILD_TESTING": "OFF",
+        "FLUENT_QT_BUILD_EXAMPLES": "OFF",
+        "FLUENT_QT_BUILD_GALLERY": "ON",
+        "FLUENT_QT_BUILD_TESTS": "OFF",
+        "FLUENT_QT_ENABLE_GALLERY_PACKAGING": "ON",
+        "VCPKG_MANIFEST_FEATURES": "gallery"
+      }
+    },
+    {
+      "name": "vcpkg-osx-x64",
+      "displayName": "vcpkg macOS x64 Debug",
+      "description": "Intel/Rosetta macOS build using vcpkg manifest dependencies. Qt is discovered from the local Qt installation.",
+      "inherits": "vcpkg-base",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      },
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-osx",
+        "CMAKE_OSX_ARCHITECTURES": "x86_64"
+      }
+    },
+    {
+      "name": "vcpkg-osx-x64-release",
+      "displayName": "vcpkg macOS x64 Release",
+      "description": "Intel/Rosetta release build used for DMG packaging.",
+      "inherits": "vcpkg-osx-x64",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BUILD_TESTING": "OFF",
+        "FLUENT_QT_BUILD_EXAMPLES": "OFF",
+        "FLUENT_QT_BUILD_GALLERY": "ON",
+        "FLUENT_QT_BUILD_TESTS": "OFF",
+        "FLUENT_QT_ENABLE_GALLERY_PACKAGING": "ON",
+        "VCPKG_MANIFEST_FEATURES": "gallery"
+      }
+    },
+    {
+      "name": "vcpkg-linux",
+      "displayName": "vcpkg Linux x64 Debug",
+      "description": "Linux x64 build using vcpkg manifest dependencies. Qt is discovered from the local or system Qt installation.",
+      "inherits": "vcpkg-base",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      },
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-linux"
+      }
+    },
+    {
+      "name": "vcpkg-linux-sanitized",
+      "displayName": "vcpkg Linux x64 Debug with ASan/UBSan",
+      "description": "Focused contract-test build with AddressSanitizer and UndefinedBehaviorSanitizer enabled.",
+      "inherits": "vcpkg-linux",
+      "cacheVariables": {
+        "FLUENT_QT_BUILD_EXAMPLES": "OFF",
+        "FLUENT_QT_BUILD_GALLERY": "OFF",
+        "FLUENT_QT_ENABLE_SANITIZERS": "ON"
+      }
+    },
+    {
+      "name": "vcpkg-linux-release",
+      "displayName": "vcpkg Linux x64 Release",
+      "description": "Linux x64 release build using vcpkg manifest dependencies. Qt is discovered from the local or system Qt installation.",
+      "inherits": "vcpkg-linux",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BUILD_TESTING": "OFF",
+        "FLUENT_QT_BUILD_EXAMPLES": "OFF",
+        "FLUENT_QT_BUILD_GALLERY": "ON",
+        "FLUENT_QT_BUILD_TESTS": "OFF",
+        "FLUENT_QT_ENABLE_GALLERY_PACKAGING": "ON",
+        "VCPKG_MANIFEST_FEATURES": "gallery"
+      }
+    },
+    {
+      "name": "vcpkg-linux-arm64",
+      "displayName": "vcpkg Linux ARM64 Debug",
+      "description": "Native Linux ARM64 build using vcpkg manifest dependencies. Qt is discovered from the local or system Qt installation.",
+      "inherits": "vcpkg-base",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      },
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "arm64-linux"
+      }
+    },
+    {
+      "name": "vcpkg-linux-arm64-release",
+      "displayName": "vcpkg Linux ARM64 Release",
+      "description": "Native Linux ARM64 release build used for DEB packaging.",
+      "inherits": "vcpkg-linux-arm64",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BUILD_TESTING": "OFF",
+        "FLUENT_QT_BUILD_EXAMPLES": "OFF",
+        "FLUENT_QT_BUILD_GALLERY": "ON",
+        "FLUENT_QT_BUILD_TESTS": "OFF",
+        "FLUENT_QT_ENABLE_GALLERY_PACKAGING": "ON",
+        "VCPKG_MANIFEST_FEATURES": "gallery"
+      }
+    },
+    {
+      "name": "vcpkg-windows",
+      "displayName": "vcpkg Windows x64 Debug",
+      "description": "Windows x64 build using vcpkg manifest dependencies. Qt Creator, Visual Studio, or the shell selects the generator and compiler.",
+      "inherits": "vcpkg-base",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-windows"
+      }
+    },
+    {
+      "name": "vcpkg-windows-release",
+      "displayName": "vcpkg Windows x64 Release",
+      "description": "Windows x64 release build used for installer packaging.",
+      "inherits": "vcpkg-windows",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BUILD_TESTING": "OFF",
+        "FLUENT_QT_BUILD_EXAMPLES": "OFF",
+        "FLUENT_QT_BUILD_GALLERY": "ON",
+        "FLUENT_QT_BUILD_TESTS": "OFF",
+        "FLUENT_QT_ENABLE_GALLERY_PACKAGING": "ON",
+        "VCPKG_MANIFEST_FEATURES": "gallery"
+      }
+    },
+    {
+      "name": "vcpkg-windows-arm64",
+      "displayName": "vcpkg Windows ARM64 Debug",
+      "description": "Windows ARM64 native or cross-build using the Visual Studio generator. Cross-build hosts also require a matching x64 host Qt kit.",
+      "inherits": "vcpkg-windows",
+      "architecture": {
+        "value": "ARM64",
+        "strategy": "set"
+      },
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "arm64-windows"
+      }
+    },
+    {
+      "name": "vcpkg-windows-arm64-release",
+      "displayName": "vcpkg Windows ARM64 Release",
+      "description": "Windows ARM64 release build used for installer packaging.",
+      "inherits": "vcpkg-windows-arm64",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BUILD_TESTING": "OFF",
+        "FLUENT_QT_BUILD_EXAMPLES": "OFF",
+        "FLUENT_QT_BUILD_GALLERY": "ON",
+        "FLUENT_QT_BUILD_TESTS": "OFF",
+        "FLUENT_QT_ENABLE_GALLERY_PACKAGING": "ON",
+        "VCPKG_MANIFEST_FEATURES": "gallery"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "wasm",
+      "configurePreset": "wasm",
+      "configuration": "Release"
+    },
+    {
+      "name": "vcpkg-osx",
+      "configurePreset": "vcpkg-osx",
+      "configuration": "Debug"
+    },
+    {
+      "name": "vcpkg-osx-release",
+      "configurePreset": "vcpkg-osx-release",
+      "configuration": "Release"
+    },
+    {
+      "name": "vcpkg-osx-x64",
+      "configurePreset": "vcpkg-osx-x64",
+      "configuration": "Debug"
+    },
+    {
+      "name": "vcpkg-osx-x64-release",
+      "configurePreset": "vcpkg-osx-x64-release",
+      "configuration": "Release"
+    },
+    {
+      "name": "vcpkg-linux",
+      "configurePreset": "vcpkg-linux",
+      "configuration": "Debug"
+    },
+    {
+      "name": "vcpkg-linux-sanitized",
+      "configurePreset": "vcpkg-linux-sanitized",
+      "configuration": "Debug"
+    },
+    {
+      "name": "vcpkg-linux-release",
+      "configurePreset": "vcpkg-linux-release",
+      "configuration": "Release"
+    },
+    {
+      "name": "vcpkg-linux-arm64",
+      "configurePreset": "vcpkg-linux-arm64",
+      "configuration": "Debug"
+    },
+    {
+      "name": "vcpkg-linux-arm64-release",
+      "configurePreset": "vcpkg-linux-arm64-release",
+      "configuration": "Release"
+    },
+    {
+      "name": "vcpkg-windows",
+      "configurePreset": "vcpkg-windows",
+      "configuration": "Debug"
+    },
+    {
+      "name": "vcpkg-windows-release",
+      "configurePreset": "vcpkg-windows-release",
+      "configuration": "Release"
+    },
+    {
+      "name": "vcpkg-windows-arm64",
+      "configurePreset": "vcpkg-windows-arm64",
+      "configuration": "Debug"
+    },
+    {
+      "name": "vcpkg-windows-arm64-release",
+      "configurePreset": "vcpkg-windows-arm64-release",
+      "configuration": "Release"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "vcpkg-osx",
+      "configurePreset": "vcpkg-osx",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "vcpkg-osx-x64",
+      "configurePreset": "vcpkg-osx-x64",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "vcpkg-linux",
+      "configurePreset": "vcpkg-linux",
+      "configuration": "Debug",
+      "filter": {
+        "exclude": {
+          "label": "^local_desktop$"
+        }
+      },
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "vcpkg-linux-sanitized",
+      "configurePreset": "vcpkg-linux-sanitized",
+      "configuration": "Debug",
+      "environment": {
+        "ASAN_OPTIONS": "detect_leaks=1:halt_on_error=1",
+        "UBSAN_OPTIONS": "print_stacktrace=1:halt_on_error=1"
+      },
+      "filter": {
+        "include": {
+          "label": "^contract$"
+        },
+        "exclude": {
+          "label": "^(known_contract_gap|local_desktop)$"
+        }
+      },
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "vcpkg-linux-local-desktop",
+      "configurePreset": "vcpkg-linux",
+      "configuration": "Debug",
+      "filter": {
+        "include": {
+          "label": "^local_desktop$"
+        }
+      },
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "vcpkg-linux-arm64",
+      "configurePreset": "vcpkg-linux-arm64",
+      "configuration": "Debug",
+      "filter": {
+        "exclude": {
+          "label": "^local_desktop$"
+        }
+      },
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "vcpkg-linux-arm64-local-desktop",
+      "configurePreset": "vcpkg-linux-arm64",
+      "configuration": "Debug",
+      "filter": {
+        "include": {
+          "label": "^local_desktop$"
+        }
+      },
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "vcpkg-windows",
+      "configurePreset": "vcpkg-windows",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "vcpkg-windows-arm64",
+      "configurePreset": "vcpkg-windows-arm64",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ],
+  "packagePresets": [
+    {
+      "name": "vcpkg-osx-dmg",
+      "configurePreset": "vcpkg-osx-release",
+      "generators": [
+        "DragNDrop"
+      ],
+      "configurations": [
+        "Release"
+      ]
+    },
+    {
+      "name": "vcpkg-osx-x64-dmg",
+      "configurePreset": "vcpkg-osx-x64-release",
+      "generators": [
+        "DragNDrop"
+      ],
+      "configurations": [
+        "Release"
+      ]
+    },
+    {
+      "name": "vcpkg-windows-installer",
+      "configurePreset": "vcpkg-windows-release",
+      "generators": [
+        "NSIS"
+      ],
+      "configurations": [
+        "Release"
+      ]
+    },
+    {
+      "name": "vcpkg-windows-arm64-installer",
+      "configurePreset": "vcpkg-windows-arm64-release",
+      "generators": [
+        "NSIS"
+      ],
+      "configurations": [
+        "Release"
+      ]
+    },
+    {
+      "name": "vcpkg-linux-deb",
+      "configurePreset": "vcpkg-linux-release",
+      "generators": [
+        "DEB"
+      ],
+      "configurations": [
+        "Release"
+      ]
+    },
+    {
+      "name": "vcpkg-linux-arm64-deb",
+      "configurePreset": "vcpkg-linux-arm64-release",
+      "generators": [
+        "DEB"
+      ],
+      "configurations": [
+        "Release"
+      ]
+    }
+  ]
+}

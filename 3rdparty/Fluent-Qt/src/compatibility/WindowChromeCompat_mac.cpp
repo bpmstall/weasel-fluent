@@ -1,0 +1,873 @@
+#include "WindowChromeCompat.h"
+
+#ifdef Q_OS_MAC
+
+#include <QGuiApplication>
+
+#include <cmath>
+
+#include <CoreGraphics/CoreGraphics.h>
+#include <objc/message.h>
+#include <objc/objc.h>
+#include <objc/runtime.h>
+
+#include <cstring>
+
+namespace compatibility {
+namespace detail {
+
+namespace {
+
+// Keep Objective-C message sends local to this file so the public chrome
+// adapter stays free of Cocoa headers and Objective-C++ requirements.
+// zh_CN: 将 Objective-C 消息发送限制在本文件内，避免公共 chrome 适配器依赖 Cocoa
+// zh_CN: 头文件或 Objective-C++ 编译要求。
+constexpr unsigned long NSWindowStyleMaskFullSizeContentView = 1UL << 15;
+constexpr unsigned long NSWindowStyleMaskResizable = 1UL << 3;
+constexpr long NSWindowTitleHidden = 1;
+constexpr long NSTitlebarSeparatorStyleNone = 1;
+constexpr unsigned long NSWindowCloseButton = 0;
+constexpr unsigned long NSWindowMiniaturizeButton = 1;
+constexpr unsigned long NSWindowZoomButton = 2;
+constexpr unsigned long NSEventTypeLeftMouseDown = 1;
+constexpr unsigned long NSLeftMouseButtonMask = 1UL << 0;
+
+SEL selector(const char* name)
+{
+    return sel_registerName(name);
+}
+
+bool respondsTo(id object, SEL sel)
+{
+    if (!object)
+        return false;
+
+    using Send = BOOL (*)(id, SEL, SEL);
+    return reinterpret_cast<Send>(objc_msgSend)(object, selector("respondsToSelector:"), sel);
+}
+
+id sendId(id receiver, const char* name)
+{
+    using Send = id (*)(id, SEL);
+    return reinterpret_cast<Send>(objc_msgSend)(receiver, selector(name));
+}
+
+id sendClassId(const char* className, const char* name)
+{
+    Class cls = objc_getClass(className);
+    if (!cls)
+        return nil;
+
+    using Send = id (*)(Class, SEL);
+    return reinterpret_cast<Send>(objc_msgSend)(cls, selector(name));
+}
+
+unsigned long sendClassUnsignedLong(const char* className, const char* name)
+{
+    Class cls = objc_getClass(className);
+    if (!cls)
+        return 0;
+
+    using Send = unsigned long (*)(Class, SEL);
+    return reinterpret_cast<Send>(objc_msgSend)(cls, selector(name));
+}
+
+id sendClassCStringReturnsId(const char* className, const char* name, const char* value)
+{
+    Class cls = objc_getClass(className);
+    if (!cls)
+        return nil;
+
+    using Send = id (*)(Class, SEL, const char*);
+    return reinterpret_cast<Send>(objc_msgSend)(cls, selector(name), value);
+}
+
+id sendIdReturnsId(id receiver, const char* name, id value)
+{
+    using Send = id (*)(id, SEL, id);
+    return reinterpret_cast<Send>(objc_msgSend)(receiver, selector(name), value);
+}
+
+const char* sendCString(id receiver, const char* name)
+{
+    using Send = const char* (*)(id, SEL);
+    return reinterpret_cast<Send>(objc_msgSend)(receiver, selector(name));
+}
+
+void sendId(id receiver, const char* name, id value)
+{
+    using Send = void (*)(id, SEL, id);
+    reinterpret_cast<Send>(objc_msgSend)(receiver, selector(name), value);
+}
+
+unsigned long sendUnsignedLong(id receiver, const char* name)
+{
+    using Send = unsigned long (*)(id, SEL);
+    return reinterpret_cast<Send>(objc_msgSend)(receiver, selector(name));
+}
+
+long sendLong(id receiver, const char* name)
+{
+    using Send = long (*)(id, SEL);
+    return reinterpret_cast<Send>(objc_msgSend)(receiver, selector(name));
+}
+
+void sendUnsignedLong(id receiver, const char* name, unsigned long value)
+{
+    using Send = void (*)(id, SEL, unsigned long);
+    reinterpret_cast<Send>(objc_msgSend)(receiver, selector(name), value);
+}
+
+void sendLong(id receiver, const char* name, long value)
+{
+    using Send = void (*)(id, SEL, long);
+    reinterpret_cast<Send>(objc_msgSend)(receiver, selector(name), value);
+}
+
+void sendBool(id receiver, const char* name, BOOL value)
+{
+    using Send = void (*)(id, SEL, BOOL);
+    reinterpret_cast<Send>(objc_msgSend)(receiver, selector(name), value);
+}
+
+void sendVoid(id receiver, const char* name)
+{
+    using Send = void (*)(id, SEL);
+    reinterpret_cast<Send>(objc_msgSend)(receiver, selector(name));
+}
+
+BOOL sendBool(id receiver, const char* name)
+{
+    using Send = BOOL (*)(id, SEL);
+    return reinterpret_cast<Send>(objc_msgSend)(receiver, selector(name));
+}
+
+id sendUnsignedLongReturnsId(id receiver, const char* name, unsigned long value)
+{
+    using Send = id (*)(id, SEL, unsigned long);
+    return reinterpret_cast<Send>(objc_msgSend)(receiver, selector(name), value);
+}
+
+CGRect sendRect(id receiver, const char* name)
+{
+#if defined(__x86_64__)
+    CGRect rect = CGRectNull;
+    using Send = void (*)(CGRect*, id, SEL);
+    reinterpret_cast<Send>(objc_msgSend_stret)(&rect, receiver, selector(name));
+    return rect;
+#else
+    using Send = CGRect (*)(id, SEL);
+    return reinterpret_cast<Send>(objc_msgSend)(receiver, selector(name));
+#endif
+}
+
+CGPoint sendPoint(id receiver, const char* name)
+{
+    using Send = CGPoint (*)(id, SEL);
+    return reinterpret_cast<Send>(objc_msgSend)(receiver, selector(name));
+}
+
+void sendPoint(id receiver, const char* name, CGPoint value)
+{
+    using Send = void (*)(id, SEL, CGPoint);
+    reinterpret_cast<Send>(objc_msgSend)(receiver, selector(name), value);
+}
+
+void sendCGRect(id receiver, const char* name, CGRect value)
+{
+    using Send = void (*)(id, SEL, CGRect);
+    reinterpret_cast<Send>(objc_msgSend)(receiver, selector(name), value);
+}
+
+id sendClassIdReturnsId(const char* className, const char* name, id value)
+{
+    Class cls = objc_getClass(className);
+    if (!cls)
+        return nil;
+
+    using Send = id (*)(Class, SEL, id);
+    return reinterpret_cast<Send>(objc_msgSend)(cls, selector(name), value);
+}
+
+id allocInitWithFrame(const char* className, CGRect frame)
+{
+    Class cls = objc_getClass(className);
+    if (!cls)
+        return nil;
+
+    using Alloc = id (*)(Class, SEL);
+    id object = reinterpret_cast<Alloc>(objc_msgSend)(cls, selector("alloc"));
+    if (!object)
+        return nil;
+
+    using InitFrame = id (*)(id, SEL, CGRect);
+    return reinterpret_cast<InitFrame>(objc_msgSend)(object, selector("initWithFrame:"), frame);
+}
+
+void addSubviewPositioned(id superview, id view, long place, id relativeTo)
+{
+    using Send = void (*)(id, SEL, id, long, id);
+    reinterpret_cast<Send>(objc_msgSend)(superview, selector("addSubview:positioned:relativeTo:"),
+                                         view, place, relativeTo);
+}
+
+id nativeWindowFor(QWidget* window)
+{
+    if (!window || QGuiApplication::platformName() != QStringLiteral("cocoa"))
+        return nil;
+
+    id nativeObject = reinterpret_cast<id>(window->winId());
+    if (!nativeObject)
+        return nil;
+
+    if (respondsTo(nativeObject, selector("styleMask")))
+        return nativeObject;
+
+    if (respondsTo(nativeObject, selector("window")))
+        return sendId(nativeObject, "window");
+
+    return nil;
+}
+
+id createSystemMoveMouseDownEvent(id nsWindow)
+{
+    static constexpr const char* MouseEventFactory =
+        "mouseEventWithType:location:modifierFlags:timestamp:windowNumber:context:"
+        "eventNumber:clickCount:pressure:";
+
+    Class eventClass = objc_getClass("NSEvent");
+    if (!eventClass || !respondsTo(reinterpret_cast<id>(eventClass), selector(MouseEventFactory)) ||
+        !respondsTo(nsWindow, selector("mouseLocationOutsideOfEventStream")) ||
+        !respondsTo(nsWindow, selector("windowNumber"))) {
+        return nil;
+    }
+
+    const CGPoint location = sendPoint(nsWindow, "mouseLocationOutsideOfEventStream");
+    const long windowNumber = sendLong(nsWindow, "windowNumber");
+    using Send = id (*)(Class, SEL, unsigned long, CGPoint, unsigned long, double, long, id, long,
+                        long, float);
+    return reinterpret_cast<Send>(objc_msgSend)(eventClass, selector(MouseEventFactory),
+                                                NSEventTypeLeftMouseDown, location, 0UL, 0.0,
+                                                windowNumber, nil, 0L, 1L, 1.0f);
+}
+
+void centerTrafficLights(id nsWindow, const QRect& titleBarRect = QRect())
+{
+    if (!respondsTo(nsWindow, selector("standardWindowButton:")))
+        return;
+
+    const unsigned long buttons[] = {NSWindowCloseButton, NSWindowMiniaturizeButton,
+                                     NSWindowZoomButton};
+
+    for (unsigned long buttonType : buttons) {
+        id button = sendUnsignedLongReturnsId(nsWindow, "standardWindowButton:", buttonType);
+        if (!button || !respondsTo(button, selector("frame")) ||
+            !respondsTo(button, selector("setFrameOrigin:")))
+            continue;
+
+        id superview =
+            respondsTo(button, selector("superview")) ? sendId(button, "superview") : nil;
+        if (!superview || !respondsTo(superview, selector("bounds")))
+            continue;
+
+        const CGRect frame = sendRect(button, "frame");
+        const CGRect bounds = sendRect(superview, "bounds");
+        if (bounds.size.height <= 0 || frame.size.height <= 0)
+            continue;
+
+        CGFloat targetCenterY = bounds.size.height / 2.0;
+        if (titleBarRect.height() > 0) {
+            // Cocoa button frames are expressed in the superview coordinate system;
+            // convert the QWidget title-bar center while respecting flipped views.
+            // zh_CN: Cocoa 按钮 frame 使用 superview 坐标系；这里将 QWidget 标题栏中心
+            // zh_CN: 转换过去，并处理 flipped view。
+            const CGFloat titleBarCenterFromTop = titleBarRect.y() + titleBarRect.height() / 2.0;
+            const bool flipped =
+                respondsTo(superview, selector("isFlipped")) && sendBool(superview, "isFlipped");
+            targetCenterY =
+                flipped ? titleBarCenterFromTop : bounds.size.height - titleBarCenterFromTop;
+        }
+
+        const CGFloat y = qRound(targetCenterY - frame.size.height / 2.0);
+        sendPoint(button, "setFrameOrigin:", CGPointMake(frame.origin.x, y));
+    }
+}
+
+void syncUnifiedTitleBarGeometry(QWidget* window, const WindowChromeOptions& options)
+{
+    if (QGuiApplication::platformName() != QStringLiteral("cocoa"))
+        return;
+
+    id nsWindow = nativeWindowFor(window);
+    if (!nsWindow)
+        return;
+
+    centerTrafficLights(nsWindow, options.titleBarRect);
+}
+
+void syncUnifiedTitleBarAppearance(id nsWindow)
+{
+    if (!nsWindow)
+        return;
+
+    sendLong(nsWindow, "setTitleVisibility:", NSWindowTitleHidden);
+    sendBool(nsWindow, "setTitlebarAppearsTransparent:", YES);
+    if (respondsTo(nsWindow, selector("setTitlebarSeparatorStyle:")))
+        sendLong(nsWindow, "setTitlebarSeparatorStyle:", NSTitlebarSeparatorStyleNone);
+    sendBool(nsWindow, "setMovableByWindowBackground:", NO);
+}
+
+void syncNativeChromeInteractivity(QWidget* window, const WindowChromeOptions& options)
+{
+    if (QGuiApplication::platformName() != QStringLiteral("cocoa"))
+        return;
+
+    id nsWindow = nativeWindowFor(window);
+    if (!nsWindow || !respondsTo(nsWindow, selector("styleMask")) ||
+        !respondsTo(nsWindow, selector("setStyleMask:"))) {
+        return;
+    }
+
+    const bool qtAllowsResize = window->minimumWidth() < window->maximumWidth() ||
+                                window->minimumHeight() < window->maximumHeight();
+    const bool resizeEnabled = options.chromeInteractive && qtAllowsResize;
+    const unsigned long styleMask = sendUnsignedLong(nsWindow, "styleMask");
+    const unsigned long updatedStyleMask = resizeEnabled ? styleMask | NSWindowStyleMaskResizable
+                                                         : styleMask & ~NSWindowStyleMaskResizable;
+    if (updatedStyleMask != styleMask)
+        sendUnsignedLong(nsWindow, "setStyleMask:", updatedStyleMask);
+
+    if (!respondsTo(nsWindow, selector("standardWindowButton:")))
+        return;
+
+    const unsigned long buttons[] = {NSWindowCloseButton, NSWindowMiniaturizeButton,
+                                     NSWindowZoomButton};
+    for (unsigned long buttonType : buttons) {
+        id button = sendUnsignedLongReturnsId(nsWindow, "standardWindowButton:", buttonType);
+        if (!button || !respondsTo(button, selector("setEnabled:")))
+            continue;
+
+        const bool enabled =
+            options.chromeInteractive && (buttonType != NSWindowZoomButton || qtAllowsResize);
+        sendBool(button, "setEnabled:", enabled ? YES : NO);
+    }
+}
+
+void applyUnifiedTitleBar(QWidget* window, const WindowChromeOptions& options)
+{
+    if (QGuiApplication::platformName() != QStringLiteral("cocoa"))
+        return;
+
+    id nsWindow = nativeWindowFor(window);
+    if (!nsWindow)
+        return;
+
+    const unsigned long styleMask = sendUnsignedLong(nsWindow, "styleMask");
+    sendUnsignedLong(nsWindow, "setStyleMask:", styleMask | NSWindowStyleMaskFullSizeContentView);
+    syncUnifiedTitleBarAppearance(nsWindow);
+    syncNativeChromeInteractivity(window, options);
+    syncUnifiedTitleBarGeometry(window, options);
+}
+
+bool performNativeTitleBarDoubleClick(QWidget* window)
+{
+    if (QGuiApplication::platformName() != QStringLiteral("cocoa"))
+        return false;
+
+    id nsWindow = nativeWindowFor(window);
+    if (!nsWindow)
+        return false;
+
+    id key =
+        sendClassCStringReturnsId("NSString", "stringWithUTF8String:", "AppleActionOnDoubleClick");
+    id defaults = sendClassId("NSUserDefaults", "standardUserDefaults");
+    id action = (defaults && key && respondsTo(defaults, selector("stringForKey:")))
+                    ? sendIdReturnsId(defaults, "stringForKey:", key)
+                    : nil;
+    const char* actionText = (action && respondsTo(action, selector("UTF8String")))
+                                 ? sendCString(action, "UTF8String")
+                                 : nullptr;
+
+    // Match the macOS System Settings behavior for double-clicking a title bar.
+    // zh_CN: 与 macOS 系统设置中的标题栏双击行为保持一致。
+    if (actionText && std::strcmp(actionText, "None") == 0)
+        return true;
+
+    if (actionText && std::strcmp(actionText, "Minimize") == 0) {
+        if (!respondsTo(nsWindow, selector("performMiniaturize:")))
+            return false;
+
+        sendId(nsWindow, "performMiniaturize:", nil);
+        return true;
+    }
+
+    if (!respondsTo(nsWindow, selector("performZoom:")))
+        return false;
+
+    sendId(nsWindow, "performZoom:", nil);
+    return true;
+}
+
+// --- Native vibrancy backdrop (the macOS analogue of Windows 11 Mica) ---------------------------
+// zh_CN: 原生 vibrancy 背景（Windows 11 Mica 的 macOS 对应物）。
+//
+// The material lives in the same NSWindow as Qt. An NSVisualEffectView is inserted into the frame
+// view as a sibling immediately below Qt's QNSView, and its tint is contained inside that effect
+// view. This preserves NSWindow.contentView == QNSView, keeps text and borders in one Qt backing
+// store, and avoids a second WindowServer surface sampling stale frames from the foreground.
+// Mica uses a quieter material and stronger tint; Acrylic uses a livelier material and lighter tint.
+// zh_CN: 材质与 Qt 位于同一个 NSWindow 中。NSVisualEffectView 作为 QNSView 的兄弟视图插入
+// frame view，并严格位于 QNSView 下方；tint 则收纳在 effect view 内。这样既保持
+// NSWindow.contentView == QNSView，也让文字和边框只经过一份 Qt backing store，同时避免第二个
+// WindowServer surface 回采前景旧帧。
+// Mica 更克制且 tint 更强，Acrylic 更鲜活且 tint 更浅。
+
+// NSView identifiers used to find-or-reuse our backdrop layers across re-applies.
+// zh_CN: NSView 标识符，用于跨多次重新施加时查找/复用我们的背景层。
+constexpr char kBackdropBaseIdentifier[] = "fluentBackdropBase";
+constexpr char kBackdropTintIdentifier[] = "fluentBackdropTint";
+
+// AppKit enum values pinned locally so this file needs no Cocoa headers.
+// zh_CN: 在本地固定 AppKit 枚举值，使本文件无需 Cocoa 头文件。
+constexpr long NSVisualEffectMaterialSidebar = 7; // moderate source-list material → Mica
+constexpr long NSVisualEffectMaterialHUDWindow =
+    13; // frosted-glass material → Acrylic (most see-through)
+constexpr long NSVisualEffectBlendingModeBehindWindow = 0;
+constexpr long NSVisualEffectStateFollowsWindowActiveState = 0;
+constexpr long NSWindowAbove = 1;
+constexpr long NSWindowBelow = -1;
+constexpr unsigned long NSViewWidthSizable = 2;
+constexpr unsigned long NSViewHeightSizable = 16;
+
+id makeNSString(const char* text)
+{
+    return sendClassCStringReturnsId("NSString", "stringWithUTF8String:", text);
+}
+
+bool identifierEquals(id view, const char* identifier)
+{
+    if (!view || !respondsTo(view, selector("identifier")))
+        return false;
+
+    id current = sendId(view, "identifier");
+    const char* text = (current && respondsTo(current, selector("UTF8String")))
+                           ? sendCString(current, "UTF8String")
+                           : nullptr;
+    return text && std::strcmp(text, identifier) == 0;
+}
+
+id findSubviewWithIdentifier(id superview, const char* identifier)
+{
+    if (!superview || !respondsTo(superview, selector("subviews")))
+        return nil;
+
+    id subviews = sendId(superview, "subviews");
+    if (!subviews)
+        return nil;
+
+    const unsigned long count = sendUnsignedLong(subviews, "count");
+    for (unsigned long index = 0; index < count; ++index) {
+        id view = sendUnsignedLongReturnsId(subviews, "objectAtIndex:", index);
+        if (identifierEquals(view, identifier))
+            return view;
+    }
+    return nil;
+}
+
+bool isSubviewBelow(id superview, id lowerView, id upperView)
+{
+    if (!superview || !lowerView || !upperView || !respondsTo(superview, selector("subviews"))) {
+        return false;
+    }
+
+    id subviews = sendId(superview, "subviews");
+    const unsigned long count = subviews ? sendUnsignedLong(subviews, "count") : 0;
+    unsigned long lowerIndex = count;
+    unsigned long upperIndex = count;
+    for (unsigned long index = 0; index < count; ++index) {
+        id view = sendUnsignedLongReturnsId(subviews, "objectAtIndex:", index);
+        if (view == lowerView)
+            lowerIndex = index;
+        if (view == upperView)
+            upperIndex = index;
+    }
+    return lowerIndex < upperIndex;
+}
+
+void applyEffectAppearance(id effectView, bool dark)
+{
+    if (!effectView || !respondsTo(effectView, selector("setAppearance:")))
+        return;
+
+    // Drive the material's light/dark variant from the app theme rather than the system
+    // appearance, so vibrancy matches our in-app theme toggle.
+    // zh_CN: 用应用主题（而非系统外观）驱动材质的明暗变体，使 vibrancy 跟随应用内主题切换。
+    id name = makeNSString(dark ? "NSAppearanceNameDarkAqua" : "NSAppearanceNameAqua");
+    id appearance = name ? sendClassIdReturnsId("NSAppearance", "appearanceNamed:", name) : nil;
+    if (appearance)
+        sendId(effectView, "setAppearance:", appearance);
+}
+
+// Find or create the native material as a sibling immediately behind Qt's content view.
+// zh_CN: 查找或创建原生材质兄弟视图，并将它严格放在 Qt content view 后方。
+id ensureBackdropView(id superview, id contentView, long material)
+{
+    id effectView = findSubviewWithIdentifier(superview, kBackdropBaseIdentifier);
+    if (effectView) {
+        sendLong(effectView, "setMaterial:", material);
+        if (!isSubviewBelow(superview, effectView, contentView))
+            addSubviewPositioned(superview, effectView, NSWindowBelow, contentView);
+        return isSubviewBelow(superview, effectView, contentView) ? effectView : nil;
+    }
+
+    const CGRect frame = sendRect(contentView, "frame");
+    effectView = allocInitWithFrame("NSVisualEffectView", frame);
+    if (!effectView)
+        return nil;
+
+    if (id name = makeNSString(kBackdropBaseIdentifier))
+        sendId(effectView, "setIdentifier:", name);
+    sendBool(effectView, "setWantsLayer:", YES);
+    sendUnsignedLong(effectView, "setAutoresizingMask:", NSViewWidthSizable | NSViewHeightSizable);
+    sendLong(effectView, "setMaterial:", material);
+    sendLong(effectView, "setBlendingMode:", NSVisualEffectBlendingModeBehindWindow);
+    sendLong(effectView, "setState:", NSVisualEffectStateFollowsWindowActiveState);
+    addSubviewPositioned(superview, effectView, NSWindowBelow, contentView);
+    sendVoid(effectView, "release");
+    return isSubviewBelow(superview, effectView, contentView) ? effectView : nil;
+}
+
+// Sets a layer-backed view's app-surface tint at the requested alpha.
+// zh_CN: 按指定 alpha 设置图层视图的应用表面 tint。
+void setMicaTintColor(id view, bool dark, double alpha)
+{
+    if (!view || !respondsTo(view, selector("layer")))
+        return;
+
+    id layer = sendId(view, "layer");
+    if (!layer || !respondsTo(layer, selector("setBackgroundColor:")))
+        return;
+
+    const CGFloat r = (dark ? 32.0 : 243.0) / 255.0;
+    const CGFloat g = (dark ? 32.0 : 242.0) / 255.0;
+    const CGFloat b = (dark ? 32.0 : 241.0) / 255.0;
+    CGColorRef color = CGColorCreateGenericRGB(r, g, b, alpha);
+    using SetBackground = void (*)(id, SEL, CGColorRef);
+    reinterpret_cast<SetBackground>(objc_msgSend)(layer, selector("setBackgroundColor:"), color);
+    CGColorRelease(color);
+}
+
+id ensureTintView(id base)
+{
+    if (!base || !respondsTo(base, selector("subviews")))
+        return nil;
+
+    id subviews = sendId(base, "subviews");
+    const unsigned long count = subviews ? sendUnsignedLong(subviews, "count") : 0;
+    for (unsigned long index = 0; index < count; ++index) {
+        id view = sendUnsignedLongReturnsId(subviews, "objectAtIndex:", index);
+        if (!identifierEquals(view, kBackdropTintIdentifier))
+            continue;
+        sendCGRect(view, "setFrame:", sendRect(base, "bounds"));
+        return view;
+    }
+
+    const CGRect bounds = sendRect(base, "bounds");
+    id view = allocInitWithFrame("NSView", bounds);
+    if (!view)
+        return nil;
+
+    if (id name = makeNSString(kBackdropTintIdentifier))
+        sendId(view, "setIdentifier:", name);
+    sendBool(view, "setWantsLayer:", YES);
+    sendUnsignedLong(view, "setAutoresizingMask:", NSViewWidthSizable | NSViewHeightSizable);
+    addSubviewPositioned(base, view, NSWindowAbove, nil);
+    sendVoid(view, "release");
+    return view;
+}
+
+bool resolveBackdropHost(QWidget* window, id* outContentView, id* outSuperview)
+{
+    if (QGuiApplication::platformName() != QStringLiteral("cocoa"))
+        return false;
+
+    id nativeObject = reinterpret_cast<id>(window->winId());
+    id nsWindow = nativeWindowFor(window);
+    if (!nsWindow || !respondsTo(nsWindow, selector("contentView")))
+        return false;
+
+    id contentView = sendId(nsWindow, "contentView");
+    if (!contentView || !respondsTo(contentView, selector("superview")))
+        return false;
+    if (nativeObject != nsWindow && nativeObject != contentView)
+        return false;
+    if (!respondsTo(contentView, selector("window")) || sendId(contentView, "window") != nsWindow) {
+        return false;
+    }
+
+    id superview = sendId(contentView, "superview");
+    if (!superview || !respondsTo(superview, selector("window")) ||
+        sendId(superview, "window") != nsWindow) {
+        return false;
+    }
+
+    *outContentView = contentView;
+    *outSuperview = superview;
+    return true;
+}
+
+void setBackdropViewHidden(id superview, BOOL hidden)
+{
+    id base = findSubviewWithIdentifier(superview, kBackdropBaseIdentifier);
+    if (base && respondsTo(base, selector("setHidden:")))
+        sendBool(base, "setHidden:", hidden);
+}
+
+} // namespace
+
+void applyPlatformWindowFlags(QWidget* window, const WindowChromeOptions& options)
+{
+    if (!window)
+        return;
+
+    window->setWindowFlag(Qt::Window, true);
+    window->setWindowFlag(Qt::FramelessWindowHint, false);
+
+#if QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
+    if (options.preferNativeMacControls) {
+        window->setWindowFlag(Qt::ExpandedClientAreaHint, true);
+        window->setWindowFlag(Qt::NoTitleBarBackgroundHint, true);
+        window->setAttribute(Qt::WA_ContentsMarginsRespectsSafeArea, false);
+    }
+#endif
+
+    if (options.preferNativeMacControls)
+        applyUnifiedTitleBar(window, options);
+}
+
+bool handlePlatformNativeEvent(QWidget* window, const WindowChromeOptions& options,
+                               const QByteArray& eventType, void* message,
+                               FluentNativeEventResult* result)
+{
+    Q_UNUSED(window);
+    Q_UNUSED(options);
+    Q_UNUSED(eventType);
+    Q_UNUSED(message);
+    Q_UNUSED(result);
+    return false;
+}
+
+bool beginPlatformSystemMove(QWidget* window, const QPoint& globalPos)
+{
+    Q_UNUSED(globalPos);
+    if (!window || QGuiApplication::platformName() != QStringLiteral("cocoa"))
+        return false;
+
+    id nsWindow = nativeWindowFor(window);
+    if (!nsWindow || !respondsTo(nsWindow, selector("performWindowDragWithEvent:")))
+        return false;
+
+    // QTBUG-141220: QCocoaWindow::startSystemMove() rejects intermittent trackpad
+    // pressure/gesture events even though the left button is still down. Hand
+    // AppKit a fresh mouse-down event so native dragging, Spaces, and
+    // window-server behavior remain intact instead of using QWidget::move().
+    // zh_CN: QTBUG-141220 中 QCocoaWindow::startSystemMove() 会间歇性拒绝触控板
+    // pressure/gesture 事件；在左键仍按下时合成 mouse-down 交还 AppKit，保留原生拖动与
+    // Spaces 行为。
+    if ((sendClassUnsignedLong("NSEvent", "pressedMouseButtons") & NSLeftMouseButtonMask) == 0) {
+        return false;
+    }
+
+    id mouseDownEvent = createSystemMoveMouseDownEvent(nsWindow);
+    if (!mouseDownEvent)
+        return false;
+
+    sendId(nsWindow, "performWindowDragWithEvent:", mouseDownEvent);
+    return true;
+}
+
+bool beginPlatformSystemResize(QWidget* window, Qt::Edges edges, const QPoint& globalPos)
+{
+    Q_UNUSED(window);
+    Q_UNUSED(edges);
+    Q_UNUSED(globalPos);
+    return false;
+}
+
+bool performPlatformTitleBarDoubleClick(QWidget* window, const WindowChromeOptions& options)
+{
+    if (!options.preferNativeMacControls)
+        return false;
+
+    return performNativeTitleBarDoubleClick(window);
+}
+
+bool showPlatformSystemMenu(QWidget* window, const QPoint& globalPos)
+{
+    Q_UNUSED(window);
+    Q_UNUSED(globalPos);
+    return false;
+}
+
+void syncPlatformTitleBarGeometry(QWidget* window, const WindowChromeOptions& options)
+{
+    if (!window || !options.preferNativeMacControls)
+        return;
+
+    syncUnifiedTitleBarAppearance(nativeWindowFor(window));
+    syncNativeChromeInteractivity(window, options);
+    syncUnifiedTitleBarGeometry(window, options);
+}
+
+int nativeTitleBarLeadingInset(QWidget* window)
+{
+    if (QGuiApplication::platformName() != QStringLiteral("cocoa"))
+        return 0;
+
+    id nsWindow = nativeWindowFor(window);
+    if (!nsWindow || !respondsTo(nsWindow, selector("standardWindowButton:")))
+        return 0;
+
+    // Read the zoom button (rightmost traffic light) frame to determine
+    // how much leading space the native controls occupy.
+    // zh_CN: 读取缩放按钮（最右侧交通灯）的 frame，以确定原生控件占用的前置宽度。
+    id zoomButton =
+        sendUnsignedLongReturnsId(nsWindow, "standardWindowButton:", NSWindowZoomButton);
+    if (!zoomButton || !respondsTo(zoomButton, selector("frame")))
+        return 0;
+
+    const CGRect frame = sendRect(zoomButton, "frame");
+    if (frame.size.width <= 0)
+        return 0;
+
+    // frame is in Cocoa points which map 1:1 to Qt logical pixel coordinates.
+    // Add an 8-point gap after the rightmost button.
+    // zh_CN: Cocoa points 与 Qt 逻辑像素 1:1 对应，末尾留 8pt 间距。
+    constexpr int kTrailingGap = 8;
+    return static_cast<int>(std::ceil(frame.origin.x + frame.size.width)) + kTrailingGap;
+}
+
+int clientSideFrameMargin(QWidget* window, const WindowChromeOptions& options)
+{
+    Q_UNUSED(window);
+    Q_UNUSED(options);
+    return 0;
+}
+
+bool manualMoveResizeFallbackAllowed(QWidget* window, const WindowChromeOptions& options)
+{
+    Q_UNUSED(window);
+    Q_UNUSED(options);
+    return false;
+}
+
+BackdropCapabilities platformBackdropCapabilities()
+{
+    BackdropCapabilities capabilities;
+    const bool supported = QGuiApplication::platformName() == QStringLiteral("cocoa") &&
+                           objc_getClass("NSVisualEffectView") != nullptr;
+    capabilities.alphaSurfaceSupported = supported;
+    capabilities.nativeMica = supported;
+    capabilities.nativeAcrylic = supported;
+    capabilities.provider =
+        supported ? QStringLiteral("mac-vibrancy") : QStringLiteral("painted-material");
+    return capabilities;
+}
+
+bool requestPlatformForegroundActivation(QWidget* window)
+{
+    Q_UNUSED(window);
+    return false;
+}
+
+bool platformSupportsSystemBackdrop()
+{
+    // macOS gets the Mica-equivalent via a native NSVisualEffectView (vibrancy). Available on
+    // every Qt 6.9-supported macOS, so just confirm the class is present.
+    // zh_CN: macOS 通过原生 NSVisualEffectView（vibrancy）获得 Mica 等价效果。在 Qt 6.9 支持的所有 macOS
+    // 上都可用，故只需确认类存在。
+    const BackdropCapabilities capabilities = platformBackdropCapabilities();
+    return capabilities.nativeMica || capabilities.nativeAcrylic;
+}
+
+BackdropApplyResult applyPlatformSystemBackdrop(QWidget* window, BackdropEffect effect, bool dark,
+                                                bool forceRecomposite)
+{
+    BackdropApplyResult result;
+    // Solid keeps an opaque window: no vibrancy, the app paints its own themeBackdrop.
+    // zh_CN: Solid 为不透明窗口：不挂 vibrancy，由 App 自绘 themeBackdrop。
+    if (effect == BackdropEffect::Solid) {
+        id contentView = nil;
+        id superview = nil;
+        if (resolveBackdropHost(window, &contentView, &superview))
+            setBackdropViewHidden(superview, YES);
+        result.applied = true;
+        result.backend = fluent::windowing::BackdropBackend::Solid;
+        result.fidelity = fluent::windowing::BackdropFidelity::Solid;
+        result.surfaceMode = fluent::windowing::BackdropSurfaceMode::SolidOpaque;
+        result.reason = QStringLiteral("solid-requested");
+        return result;
+    }
+
+    id contentView = nil;
+    id superview = nil;
+    if (!resolveBackdropHost(window, &contentView, &superview)) {
+        result.reason = QStringLiteral("cocoa-backdrop-host-unavailable");
+        return result;
+    }
+
+    // Three visibly distinct surfaces (Normal/Solid already returned above as fully opaque):
+    //   • Mica    — sidebar material + a moderate app tint: a subtle, mostly-cohesive wallpaper tint.
+    //   • Acrylic — HUD-window (frosted-glass) material + a light tint: a much more see-through frost
+    //               that lets the desktop blur read clearly through the chrome.
+    // The previous mapping (window-background + 0.58 tint for Mica) sat so close to opaque that Mica
+    // was nearly indistinguishable from Normal, while Acrylic (sidebar + 0.20) read like a proper Mica.
+    // zh_CN: 三种可明显区分的表面（Normal/Solid 已在上方按全不透明返回）：
+    //   • Mica    —— sidebar material + 中等应用 tint：克制、基本统一的壁纸着色。
+    //   • Acrylic —— HUD-window（磨砂玻璃）material + 更浅 tint：更通透，桌面模糊清晰透过 chrome。
+    // 旧映射（Mica 用 window-background + 0.58 tint）过于接近不透明，使 Mica 与 Normal 几乎无法区分，
+    // 而 Acrylic（sidebar + 0.20）看起来反而才像真正的 Mica。
+    const bool acrylic = effect == BackdropEffect::Acrylic;
+    const long material = acrylic ? NSVisualEffectMaterialHUDWindow : NSVisualEffectMaterialSidebar;
+    id base = ensureBackdropView(superview, contentView, material);
+    if (!base) {
+        setBackdropViewHidden(superview, YES);
+        result.reason = QStringLiteral("visual-effect-view-unavailable");
+        return result;
+    }
+
+    sendBool(base, "setHidden:", NO);
+    sendUnsignedLong(base, "setAutoresizingMask:", NSViewWidthSizable | NSViewHeightSizable);
+    const CGRect contentFrame = sendRect(contentView, "frame");
+    sendCGRect(base, "setFrame:", contentFrame);
+    if (!CGRectEqualToRect(sendRect(base, "frame"), contentFrame)) {
+        sendBool(base, "setHidden:", YES);
+        result.reason = QStringLiteral("visual-effect-view-geometry-mismatch");
+        return result;
+    }
+    applyEffectAppearance(base, dark);
+
+    const double tintAlpha = acrylic ? (dark ? 0.12 : 0.16) : (dark ? 0.20 : 0.22);
+    if (id tint = ensureTintView(base)) {
+        sendCGRect(tint, "setFrame:", sendRect(base, "bounds"));
+        setMicaTintColor(tint, dark, tintAlpha);
+    }
+
+    if (forceRecomposite) {
+        if (respondsTo(base, selector("setNeedsDisplay:")))
+            sendBool(base, "setNeedsDisplay:", YES);
+        if (respondsTo(contentView, selector("setNeedsDisplay:")))
+            sendBool(contentView, "setNeedsDisplay:", YES);
+    }
+    result.applied = true;
+    result.backend = fluent::windowing::BackdropBackend::MacVibrancy;
+    result.fidelity = fluent::windowing::BackdropFidelity::Native;
+    result.surfaceMode = fluent::windowing::BackdropSurfaceMode::CompositedTransparent;
+    result.reason = QStringLiteral("mac-vibrancy-active");
+    return result;
+}
+
+} // namespace detail
+} // namespace compatibility
+
+#endif // Q_OS_MAC

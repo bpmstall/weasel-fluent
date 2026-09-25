@@ -1,0 +1,671 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing annotated tag to release, for example v1.0.0.
+        required: true
+        type: string
+      draft:
+        description: Create the GitHub Release as a draft.
+        required: true
+        default: true
+        type: boolean
+      require_ci:
+        description: Require a successful CI run for the tagged commit.
+        required: true
+        default: true
+        type: boolean
+      package_set:
+        description: Package matrix to run.
+        required: true
+        default: standard
+        type: choice
+        options:
+          - smoke
+          - standard
+      publish:
+        description: Publish or update the GitHub Release after packages finish.
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && format('{0}-{1}', inputs.tag, inputs.package_set) || github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+      base_version: ${{ steps.release.outputs.base_version }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
+      draft: ${{ steps.release.outputs.draft }}
+      require_ci: ${{ steps.release.outputs.require_ci }}
+      package_set: ${{ steps.release.outputs.package_set }}
+      publish: ${{ steps.release.outputs.publish }}
+      tag_sha: ${{ steps.release.outputs.tag_sha }}
+      promote_candidate: ${{ steps.release.outputs.promote_candidate }}
+      candidate_run_id: ${{ steps.candidate.outputs.run_id }}
+      candidate_run_attempt: ${{ steps.candidate.outputs.run_attempt }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release tag
+        id: release
+        shell: bash
+        env:
+          RELEASE_EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG_INPUT: ${{ inputs.tag }}
+          RELEASE_DRAFT_INPUT: ${{ inputs.draft }}
+          RELEASE_REQUIRE_CI_INPUT: ${{ inputs.require_ci }}
+          RELEASE_PACKAGE_SET_INPUT: ${{ inputs.package_set }}
+          RELEASE_PUBLISH_INPUT: ${{ inputs.publish }}
+        run: |
+          set -euo pipefail
+
+          git fetch --force --tags
+
+          if [[ "$RELEASE_EVENT_NAME" == "workflow_dispatch" ]]; then
+            tag="$RELEASE_TAG_INPUT"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+            echo "::error::Release tag must match vX.Y.Z or vX.Y.Z-rc.N: $tag"
+            exit 1
+          fi
+
+          if ! git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "::error::Release tag does not exist locally after fetching tags: $tag"
+            exit 1
+          fi
+
+          if ! git rev-parse -q --verify "refs/tags/$tag^{tag}" >/dev/null; then
+            echo "::error::Release tag must be annotated: $tag"
+            exit 1
+          fi
+
+          git checkout --detach "$tag"
+          python3 .github/scripts/validate-package-matrix.py
+
+          version="${tag#v}"
+          base_version="${version%%-*}"
+          cmake_version="$(sed -nE 's/^[[:space:]]*project[[:space:]]*\([[:space:]]*FluentQt[[:space:]]+VERSION[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' CMakeLists.txt | head -n 1)"
+          if [[ -z "$cmake_version" ]]; then
+            echo "::error::Could not read project(FluentQt VERSION X.Y.Z ...) from CMakeLists.txt."
+            exit 1
+          fi
+
+          if [[ "$cmake_version" != "$base_version" ]]; then
+            echo "::error::Tag $tag resolves to version $base_version, but CMakeLists.txt declares $cmake_version."
+            exit 1
+          fi
+
+          prerelease="false"
+          if [[ "$version" == *"-rc."* ]]; then
+            prerelease="true"
+          fi
+
+          if [[ "$RELEASE_EVENT_NAME" == "workflow_dispatch" ]]; then
+            draft="$RELEASE_DRAFT_INPUT"
+            require_ci="$RELEASE_REQUIRE_CI_INPUT"
+            package_set="$RELEASE_PACKAGE_SET_INPUT"
+            publish="$RELEASE_PUBLISH_INPUT"
+          elif [[ "$prerelease" == "true" ]]; then
+            draft="true"
+            require_ci="true"
+            package_set="smoke"
+            publish="false"
+          else
+            draft="false"
+            require_ci="true"
+            package_set="standard"
+            publish="true"
+          fi
+
+          case "$package_set" in
+            smoke|standard) ;;
+            *)
+              echo "::error::package_set must be smoke or standard: $package_set"
+              exit 1
+              ;;
+          esac
+          if [[ "$package_set" == "smoke" && "$publish" == "true" ]]; then
+            echo "::error::Smoke package validation cannot publish a GitHub Release. Use package_set=standard to publish."
+            exit 1
+          fi
+
+          tag_sha="$(git rev-list -n 1 "$tag")"
+          if [[ "$RELEASE_EVENT_NAME" == "workflow_dispatch" &&
+                "$publish" == "true" &&
+                "$draft" == "false" &&
+                "$prerelease" == "false" &&
+                "$GITHUB_SHA" != "$tag_sha" ]]; then
+            echo "::error::A manual stable publication must dispatch release.yml from $tag."
+            exit 1
+          fi
+
+          promote_candidate="false"
+          if [[ "$publish" == "true" &&
+                "$draft" == "false" &&
+                "$prerelease" == "false" &&
+                "$require_ci" == "true" &&
+                "$package_set" == "standard" ]]; then
+            promote_candidate="true"
+          fi
+
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "base_version=$base_version"
+            echo "prerelease=$prerelease"
+            echo "draft=$draft"
+            echo "require_ci=$require_ci"
+            echo "package_set=$package_set"
+            echo "publish=$publish"
+            echo "tag_sha=$tag_sha"
+            echo "promote_candidate=$promote_candidate"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Verify CI succeeded for tag commit
+        if: ${{ steps.release.outputs.require_ci == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          successful_checks="$(
+            gh api --paginate \
+              "repos/$GITHUB_REPOSITORY/commits/${{ steps.release.outputs.tag_sha }}/check-runs?per_page=100" \
+              --jq '[.check_runs[] | select(.name == "Release ready" and .status == "completed" and .conclusion == "success")] | length' |
+              awk '{ total += $1 } END { print total + 0 }'
+          )"
+
+          if [[ "$successful_checks" == "0" ]]; then
+            echo "::error::No successful 'Release ready' CI check was found for ${{ steps.release.outputs.tag_sha }}."
+            echo "::error::Run full CI on the exact commit before creating the tag, or use require_ci=false for a manual recovery build."
+            exit 1
+          fi
+
+      - name: Resolve immutable release candidate
+        id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROMOTE_CANDIDATE: ${{ steps.release.outputs.promote_candidate }}
+          TAG_SHA: ${{ steps.release.outputs.tag_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$PROMOTE_CANDIDATE" != "true" ]]; then
+            {
+              echo "run_id=$GITHUB_RUN_ID"
+              echo "run_attempt=$GITHUB_RUN_ATTEMPT"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          for discovery_attempt in {1..12}; do
+            mapfile -t check_urls < <(
+              gh api \
+                "repos/$GITHUB_REPOSITORY/commits/$TAG_SHA/check-runs?per_page=100" \
+                --jq \
+                  '.check_runs |
+                   map(select(.name == "Release Candidate ready" and
+                              .status == "completed" and
+                              .conclusion == "success")) |
+                   sort_by(.completed_at) | reverse | .[].details_url'
+            )
+            for details_url in "${check_urls[@]}"; do
+              if [[ ! "$details_url" =~ /actions/runs/([0-9]+) ]]; then
+                continue
+              fi
+              run_id="${BASH_REMATCH[1]}"
+              run_json="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id")"
+              run_sha="$(jq -r '.head_sha' <<< "$run_json")"
+              run_name="$(jq -r '.name' <<< "$run_json")"
+              run_path="$(jq -r '.path' <<< "$run_json")"
+              run_event="$(jq -r '.event' <<< "$run_json")"
+              run_status="$(jq -r '.status' <<< "$run_json")"
+              run_conclusion="$(jq -r '.conclusion' <<< "$run_json")"
+              run_attempt="$(jq -r '.run_attempt' <<< "$run_json")"
+              if [[ "$run_sha" != "$TAG_SHA" ||
+                    "$run_name" != "Release Candidate" ||
+                    "$run_path" != ".github/workflows/release-candidate.yml" ||
+                    ("$run_event" != "push" && "$run_event" != "workflow_dispatch") ||
+                    "$run_status" != "completed" ||
+                    "$run_conclusion" != "success" ||
+                    ! "$run_attempt" =~ ^[1-9][0-9]*$ ]]; then
+                continue
+              fi
+
+              artifact_counts="$(
+                gh api \
+                  "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts?per_page=100" \
+                  --jq \
+                    '[.artifacts[] | select(.expired == false)] |
+                     {
+                       desktop: map(select(.name == "fluentqt-desktop-release-candidate")) | length,
+                       python: map(select(.name == "fluentqt-python-release-bundle")) | length,
+                       receipt: map(select(.name == "fluentqt-release-candidate-receipt")) | length
+                     }'
+              )"
+              if jq -e \
+                '.desktop == 1 and .python == 1 and .receipt == 1' \
+                <<< "$artifact_counts" >/dev/null; then
+                {
+                  echo "run_id=$run_id"
+                  echo "run_attempt=$run_attempt"
+                } >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+            done
+            if (( discovery_attempt < 12 )); then
+              echo "::notice::Release candidate evidence is not fully visible; retrying in 10 seconds."
+              sleep 10
+            fi
+          done
+
+          echo "::error::No complete 'Release Candidate ready' run was found for $TAG_SHA."
+          echo "::error::Wait for the automatic candidate on main, or manually run Release Candidate on the tag."
+          exit 1
+
+      - name: Summarize preflight
+        shell: bash
+        run: |
+          {
+            echo "## Release preflight"
+            echo ""
+            echo "- Tag: ${{ steps.release.outputs.tag }}"
+            echo "- Version: ${{ steps.release.outputs.version }}"
+            echo "- Commit: ${{ steps.release.outputs.tag_sha }}"
+            echo "- Draft: ${{ steps.release.outputs.draft }}"
+            echo "- Prerelease: ${{ steps.release.outputs.prerelease }}"
+            echo "- Required CI: ${{ steps.release.outputs.require_ci }}"
+            echo "- Package set: ${{ steps.release.outputs.package_set }}"
+            echo "- Publish: ${{ steps.release.outputs.publish }}"
+            echo "- Promote candidate: ${{ steps.release.outputs.promote_candidate }}"
+            echo "- Candidate run: ${{ steps.candidate.outputs.run_id }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  desktop_candidate:
+    name: Build desktop release candidate
+    needs: preflight
+    if: ${{ needs.preflight.outputs.promote_candidate != 'true' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/desktop-release-candidate.yml
+    with:
+      source_ref: ${{ needs.preflight.outputs.tag }}
+      source_commit: ${{ needs.preflight.outputs.tag_sha }}
+      version: ${{ needs.preflight.outputs.base_version }}
+      package_set: ${{ needs.preflight.outputs.package_set }}
+
+  source-package:
+    name: Package source and Agent Skill
+    needs: preflight
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ needs.preflight.outputs.tag }}
+
+      - name: Create source and Agent Skill packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake \
+            -D "FLUENT_QT_SOURCE_DIR=$GITHUB_WORKSPACE" \
+            -D "FLUENT_QT_SOURCE_PACKAGE_DIR=$RUNNER_TEMP/release-source" \
+            -D "FLUENT_QT_SOURCE_PACKAGE_VERSION=${{ needs.preflight.outputs.version }}" \
+            -P cmake/CreateSourcePackage.cmake
+          python3 tools/ai/package_fluentqt_skill.py \
+            --project-root . \
+            --output-dir "$RUNNER_TEMP/release-source" \
+            --version "${{ needs.preflight.outputs.version }}"
+
+      - name: Upload source and Agent Skill packages
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-source
+          if-no-files-found: error
+          retention-days: 14
+          path: ${{ runner.temp }}/release-source/*.zip
+
+  python_candidate:
+    name: Build Python release candidate
+    needs: preflight
+    if: >-
+      ${{
+        needs.preflight.outputs.publish == 'true' &&
+        needs.preflight.outputs.draft == 'false' &&
+        needs.preflight.outputs.prerelease == 'false' &&
+        needs.preflight.outputs.promote_candidate != 'true'
+      }}
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/ci-python.yml
+    with:
+      mode: full
+      build_release_bundle: true
+      run_macos_release_validation: true
+
+  publish:
+    name: Publish GitHub Release
+    needs: [preflight, desktop_candidate, source-package, python_candidate]
+    if: >-
+      ${{
+        always() &&
+        needs.preflight.result == 'success' &&
+        needs.source-package.result == 'success' &&
+        needs.preflight.outputs.publish == 'true' &&
+        ((needs.preflight.outputs.promote_candidate == 'true' &&
+          needs.desktop_candidate.result == 'skipped' &&
+          needs.python_candidate.result == 'skipped') ||
+         (needs.preflight.outputs.promote_candidate != 'true' &&
+          needs.desktop_candidate.result == 'success' &&
+          (needs.preflight.outputs.draft == 'true' ||
+           needs.preflight.outputs.prerelease == 'true' ||
+           needs.python_candidate.result == 'success')))
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ needs.preflight.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Generate release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/release/generate_changelog.py \
+            --tag "${{ needs.preflight.outputs.tag }}" \
+            --audience public \
+            --require-curated \
+            --check \
+            --output release-notes.md
+
+      - name: Download immutable desktop candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: fluentqt-desktop-release-candidate
+          path: ${{ runner.temp }}/fluentqt-desktop-release-candidate
+          run-id: ${{ needs.preflight.outputs.candidate_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Verify and stage desktop packages
+        env:
+          CANDIDATE_RUN_ID: ${{ needs.preflight.outputs.candidate_run_id }}
+          CANDIDATE_RUN_ATTEMPT: ${{ needs.preflight.outputs.candidate_run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          candidate="${RUNNER_TEMP}/fluentqt-desktop-release-candidate"
+          manifest="$candidate/desktop-release-manifest.json"
+          source_attempt="$(jq -r '.source.ci_run_attempt' "$manifest")"
+          if [[ ! "$source_attempt" =~ ^[1-9][0-9]*$ ||
+                "$source_attempt" -gt "$CANDIDATE_RUN_ATTEMPT" ]]; then
+            echo "::error::Desktop candidate contains an invalid workflow attempt."
+            exit 1
+          fi
+          python3 .github/scripts/assemble-desktop-release-candidate.py verify \
+            --candidate "$candidate" \
+            --version "${{ needs.preflight.outputs.base_version }}" \
+            --package-set "${{ needs.preflight.outputs.package_set }}" \
+            --repository "$GITHUB_REPOSITORY" \
+            --commit "${{ needs.preflight.outputs.tag_sha }}" \
+            --ci-run-id "$CANDIDATE_RUN_ID" \
+            --ci-run-attempt "$source_attempt"
+          mkdir -p release-dist
+          cp "$candidate/dist/"* release-dist/
+
+      - name: Download source packages
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-source
+          path: release-dist
+
+      - name: Generate SHA256SUMS.txt
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -d '' packages < <(
+            find release-dist -maxdepth 1 -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.deb' -o -name '*.zip' \) -print0 | sort -z
+          )
+          if [[ "${#packages[@]}" == "0" ]]; then
+            echo "::error::No release packages were downloaded."
+            exit 1
+          fi
+
+          : > release-dist/SHA256SUMS.txt
+          for package in "${packages[@]}"; do
+            checksum="$(sha256sum "$package" | awk '{print $1}')"
+            relative_path="${package#release-dist/}"
+            printf "%s  %s\n" "$checksum" "$relative_path" >> release-dist/SHA256SUMS.txt
+          done
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="${{ needs.preflight.outputs.tag }}"
+          draft="${{ needs.preflight.outputs.draft }}"
+          prerelease="${{ needs.preflight.outputs.prerelease }}"
+
+          mapfile -d '' release_assets < <(
+            find release-dist -maxdepth 1 -type f -print0 | sort -z
+          )
+          if [[ "${#release_assets[@]}" == "0" ]]; then
+            echo "::error::No release assets were prepared."
+            exit 1
+          fi
+
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Fluent-Qt $tag" \
+              --notes-file release-notes.md \
+              --draft="$draft" \
+              --prerelease="$prerelease"
+            gh release upload "$tag" "${release_assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+            exit 0
+          fi
+
+          args=(
+            release create "$tag"
+            "${release_assets[@]}"
+            --repo "$GITHUB_REPOSITORY"
+            --verify-tag
+            --title "Fluent-Qt $tag"
+            --notes-file release-notes.md
+          )
+
+          if [[ "$draft" == "true" ]]; then
+            args+=(--draft)
+          fi
+          if [[ "$prerelease" == "true" ]]; then
+            args+=(--prerelease)
+          fi
+
+          gh "${args[@]}"
+
+      - name: Summarize release assets
+        shell: bash
+        run: |
+          {
+            echo "## Release assets"
+            echo ""
+            find release-dist -maxdepth 1 -type f -printf "- %f\n" | sort
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish_python:
+    name: Publish Python distributions
+    needs: [preflight, python_candidate, publish]
+    if: >-
+      ${{
+        always() &&
+        needs.preflight.result == 'success' &&
+        needs.publish.result == 'success' &&
+        needs.preflight.outputs.publish == 'true' &&
+        needs.preflight.outputs.draft == 'false' &&
+        needs.preflight.outputs.prerelease == 'false' &&
+        ((needs.preflight.outputs.promote_candidate == 'true' &&
+          needs.python_candidate.result == 'skipped') ||
+         (needs.preflight.outputs.promote_candidate != 'true' &&
+          needs.python_candidate.result == 'success'))
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Download synchronized Python candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: fluentqt-python-release-bundle
+          path: ${{ runner.temp }}/fluentqt-python-release-bundle
+          run-id: ${{ needs.preflight.outputs.candidate_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Resolve synchronized candidate identity
+        id: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          manifest="${RUNNER_TEMP}/fluentqt-python-release-bundle/python-release-manifest.json"
+          source_run_id="$(jq -r '.source.ci_run_id' "$manifest")"
+          source_run_attempt="$(jq -r '.source.ci_run_attempt' "$manifest")"
+          if [[ "$source_run_id" != "${{ needs.preflight.outputs.candidate_run_id }}" ||
+                ! "$source_run_attempt" =~ ^[1-9][0-9]*$ ||
+                "$source_run_attempt" -gt "${{ needs.preflight.outputs.candidate_run_attempt }}" ]]; then
+            echo "::error::The Python candidate does not belong to the selected candidate run."
+            exit 1
+          fi
+          jq -e \
+            --arg version "${{ needs.preflight.outputs.base_version }}" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg commit "${{ needs.preflight.outputs.tag_sha }}" \
+            '.version == $version and
+             .source.repository == $repository and
+             .source.commit == $commit' \
+            "$manifest"
+          {
+            echo "source_run_id=$source_run_id"
+            echo "source_run_attempt=$source_run_attempt"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch synchronized Python publication
+        id: python_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="${{ needs.preflight.outputs.tag }}"
+          tag_sha="${{ needs.preflight.outputs.tag_sha }}"
+          release_json="$(
+            gh release view "$tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json isDraft,isPrerelease,tagName
+          )"
+          jq -e \
+            --arg tag "$tag" \
+            '.tagName == $tag and .isDraft == false and .isPrerelease == false' \
+            <<< "$release_json" >/dev/null || {
+              echo "::error::Python publication requires a public stable GitHub Release."
+              exit 1
+            }
+
+          run_url="$(
+            gh workflow run python-release.yml \
+              --repo "$GITHUB_REPOSITORY" \
+              --ref "$tag" \
+              -f stage=all \
+              -f recovery=false \
+              -f source_run_id="${{ steps.candidate.outputs.source_run_id }}" \
+              -f source_run_attempt="${{ steps.candidate.outputs.source_run_attempt }}"
+          )"
+          if [[ ! "$run_url" =~ /actions/runs/([0-9]+)$ ]]; then
+            for discovery_attempt in {1..12}; do
+              run_url="$(
+                gh run list \
+                  --repo "$GITHUB_REPOSITORY" \
+                  --workflow python-release.yml \
+                  --event workflow_dispatch \
+                  --commit "$tag_sha" \
+                  --limit 20 \
+                  --json databaseId,displayTitle,url \
+                  --jq \
+                    'map(select(.displayTitle == "Python all release from '"$tag"'")) |
+                     sort_by(.databaseId) | reverse | .[0].url // empty'
+              )"
+              if [[ "$run_url" =~ /actions/runs/([0-9]+)$ ]]; then
+                break
+              fi
+              if (( discovery_attempt < 12 )); then
+                sleep 5
+              fi
+            done
+          fi
+          if [[ ! "$run_url" =~ /actions/runs/([0-9]+)$ ]]; then
+            echo "::error::Python Release was dispatched, but its run could not be resolved."
+            exit 1
+          fi
+          run_id="${BASH_REMATCH[1]}"
+          {
+            echo "run_id=$run_id"
+            echo "run_url=$run_url"
+          } >> "$GITHUB_OUTPUT"
+
+          gh run watch "$run_id" \
+            --repo "$GITHUB_REPOSITORY" \
+            --compact \
+            --interval 10 \
+            --exit-status
+
+      - name: Summarize Python publication
+        shell: bash
+        run: |
+          {
+            echo "## Python distributions"
+            echo ""
+            echo "- TestPyPI and PyPI: ${{ steps.python_release.outputs.run_url }}"
+          } >> "$GITHUB_STEP_SUMMARY"

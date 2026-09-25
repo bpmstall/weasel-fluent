@@ -1,0 +1,258 @@
+#ifndef FLUENTWINDOW_H
+#define FLUENTWINDOW_H
+
+#include <memory>
+
+#include <QPoint>
+#include <QRect>
+#include <QWidget>
+
+#include "compatibility/WindowChromeCompat.h"
+#include "components/foundation/FluentElement.h"
+#include "components/foundation/QMLPlus.h"
+
+class QMouseEvent;
+class QPaintEvent;
+class QPainter;
+class QPixmap;
+class QResizeEvent;
+class QShowEvent;
+class QVBoxLayout;
+
+namespace fluent::basicinput {
+class Button;
+}
+
+namespace fluent::windowing {
+
+class ClientSideFrameEdgeOverlay;
+struct ClientSideFramePaintOptions;
+class TitleBar;
+class WindowResizeSession;
+
+/**
+ * @brief Application shell window with title-bar and content hosting.
+ * zh_CN: 支持标题栏和内容承载的应用外壳窗口。
+ *
+ * Window keeps platform chrome policy in one place. Native platform window
+ * management is preferred by default; client-side frame and resize handling are
+ * fallback/opt-in paths.
+ * zh_CN: Window 集中管理平台窗口 chrome 策略。默认优先使用系统窗口管理；
+ * 客户端边框和缩放处理仅作为回退或显式启用路径。
+ */
+class Window : public QWidget, public FluentElement, public QMLPlus {
+    Q_OBJECT
+    /**
+     * @brief Caller-owned widget hosted as component content.
+     * zh_CN: 作为组件内容承载的调用方控件。
+     */
+    Q_PROPERTY(QWidget* contentWidget READ contentWidget WRITE setContentWidget)
+    Q_PROPERTY(BackdropEffect backdropEffect READ backdropEffect WRITE setBackdropEffect
+                   NOTIFY backdropEffectChanged)
+
+public:
+    explicit Window(QWidget* parent = nullptr);
+    ~Window() override;
+
+    TitleBar* titleBar() const { return m_titleBar; }
+    QWidget* contentHost() const { return m_contentHost; }
+
+    /**
+     * @brief Visible chrome/content frame in this window's local coordinates.
+     * zh_CN: 当前窗口局部坐标中的可见 chrome/内容框。
+     */
+    QRect chromeFrameRect() const;
+
+    QWidget* contentWidget() const { return m_contentWidget; }
+    void setContentWidget(QWidget* widget);
+
+    /**
+     * @brief Enables Fluent-managed title-bar/non-client integration.
+     * zh_CN: 启用由 Fluent 管理的标题栏/非客户区集成。
+     *
+     * This is an opt-in integration point. The platform adapter still decides
+     * whether native move/resize is available or a client-side fallback is needed.
+     * zh_CN: 这是显式启用的集成点；平台适配层仍决定使用系统移动/缩放，
+     * 还是启用客户端回退。
+     */
+    void setCustomWindowChromeEnabled(bool enabled);
+    bool customWindowChromeEnabled() const;
+
+    void onThemeUpdated() override;
+
+    /**
+     * @brief Re-probes and re-applies the configured backdrop.
+     * zh_CN: 重新探测并施加当前配置的背景。
+     */
+    void reapplySystemBackdrop();
+
+    /**
+     * @brief Reasserts native chrome while a hidden window is prepared for restore.
+     * zh_CN: 在隐藏窗口准备恢复显示时重新声明原生窗口边框配置。
+     */
+    void prepareForNativeRestore();
+
+    /**
+     * @brief Requests foreground activation through Qt and the platform adapter.
+     * zh_CN: 通过 Qt 与平台适配层请求将窗口激活到前台。
+     */
+    void requestForegroundActivation();
+
+    /**
+     * @brief Sets the window background effect and re-applies it live.
+     * zh_CN: 设置窗口背景效果并实时重新施加。
+     *
+     * Once top-level translucency is enabled it stays stable; switching effects
+     * updates typed paint state and the requested OS backdrop without removing
+     * that native alpha surface.
+     * zh_CN: 顶层半透明一旦启用便保持稳定；切换效果只更新强类型绘制状态和系统背景请求。
+     */
+    void setBackdropEffect(BackdropEffect effect);
+    BackdropEffect backdropEffect() const { return m_backdropEffect; }
+
+    /**
+     * @brief Effective backdrop state after platform capability resolution.
+     * zh_CN: 平台能力解析后的实际背景状态。
+     */
+    BackdropState backdropState() const { return m_backdropState; }
+
+    /**
+     * @brief Backdrop capabilities currently advertised by the platform session.
+     * zh_CN: 当前平台会话公布的背景能力。
+     */
+    BackdropCapabilities backdropCapabilities() const { return m_backdropCapabilities; }
+
+    /**
+     * @brief Enables/disables user move + resize through the window chrome.
+     * zh_CN: 启用或禁用通过窗口 chrome 进行的用户移动和缩放。
+     */
+    void setChromeInteractive(bool interactive);
+    bool isChromeInteractive() const { return m_chromeInteractive; }
+
+    /**
+     * @brief Sets caption-button tooltips; empty strings hide a tooltip.
+     * zh_CN: 设置标题栏按钮提示文案；空字符串表示不显示该提示。
+     *
+     * Defaults are empty so the library does not hard-code a language.
+     * Pass restoreTooltip for the maximize button while the window is maximized.
+     * zh_CN: 默认均为空，避免库内写死语言。最大化状态下的还原提示使用 restoreTooltip。
+     */
+    void setCaptionButtonToolTips(const QString& minimizeTooltip,
+                                  const QString& maximizeTooltip,
+                                  const QString& closeTooltip,
+                                  const QString& restoreTooltip = QString());
+    /**
+     * @brief Sets application-owned accessible names for the caption buttons.
+     * zh_CN: 设置由应用拥有的标题栏按钮无障碍名称。
+     *
+     * Defaults remain empty; this API does not translate or synthesize labels.
+     * zh_CN: 默认保持为空；该接口不会翻译或生成标签。
+     */
+    void setCaptionButtonAccessibleNames(const QString& minimizeName,
+                                         const QString& maximizeName,
+                                         const QString& closeName,
+                                         const QString& restoreName = QString());
+
+public slots:
+    void minimizeWindow();
+    void toggleMaximizeRestore();
+    void closeWindow();
+
+signals:
+    void backdropEffectChanged(BackdropEffect effect);
+    void backdropStateChanged(const BackdropState& state);
+    void minimizeRequested();
+    void maximizeRequested();
+    void restoreRequested();
+    void closeRequested();
+
+protected:
+    bool event(QEvent* event) override;
+    void paintEvent(QPaintEvent* event) override;
+    void mousePressEvent(QMouseEvent* event) override;
+    void mouseMoveEvent(QMouseEvent* event) override;
+    void mouseReleaseEvent(QMouseEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
+    void showEvent(QShowEvent* event) override;
+    void changeEvent(QEvent* event) override;
+    bool nativeEvent(const QByteArray& eventType,
+                     void* message,
+                     compatibility::FluentNativeEventResult* result) override;
+
+private slots:
+    void updateChromeOptions();
+    void syncTitleBarSystemInsets();
+    void syncCaptionButtons();
+    void syncCaptionButtonActivation(bool active);
+    void handleTitleBarDragStarted(const QPoint& globalPos);
+    void handleTitleBarDragMoved(const QPoint& globalPos);
+    void handleTitleBarDragFinished();
+    void handleTitleBarDoubleClicked(const QPoint& globalPos);
+    void handleTitleBarContextMenuRequested(const QPoint& globalPos);
+
+private:
+    void refreshBackdropCapabilities();
+    void scheduleBackdropResolution();
+    void scheduleNativeChromeRepair();
+    void resolveBackdropState(bool applyPlatform, bool forceRecomposite = false);
+    void setEffectiveBackdropState(const BackdropState& state);
+    BackdropState paintedFallbackState(const QString& reason) const;
+    void setupCaptionButtons();
+    void updateMaximizeButtonIcon();
+    bool usesHostedWindowSurface() const;
+    bool isEffectivelyActive() const;
+    bool isEffectivelyMaximized() const;
+    int captionButtonReservedWidth() const;
+    int activeClientSideFrameMargin() const;
+    QRect windowFrameRect() const;
+    ClientSideFramePaintOptions clientSideFramePaintOptions() const;
+    void invalidatePaintedSurfaceCache();
+    void paintPaintedSurface(QPainter& painter, bool includeClientFrame);
+    void syncClientSideFrameMargins();
+    void syncClientSideFrameShape();
+    void syncClientSideResizeInput();
+    bool usesClientSideResizeInput() const;
+    Qt::Edges resizeEdgesAtLocalPos(const QPoint& localPos) const;
+    bool handleResizeBorderMouseEvent(QWidget* source, QMouseEvent* event);
+    void resizeFromGlobalPoint(const QPoint& globalPos);
+
+    TitleBar* m_titleBar = nullptr;
+    QVBoxLayout* m_rootLayout = nullptr;
+    QWidget* m_frameHost = nullptr;
+    ClientSideFrameEdgeOverlay* m_frameEdgeOverlay = nullptr;
+    QWidget* m_contentHost = nullptr;
+    QWidget* m_contentWidget = nullptr;
+    QWidget* m_captionButtonHost = nullptr;
+    fluent::basicinput::Button* m_minimizeButton = nullptr;
+    fluent::basicinput::Button* m_maximizeButton = nullptr;
+    fluent::basicinput::Button* m_closeButton = nullptr;
+    compatibility::WindowChromeCompat m_chrome;
+    BackdropEffect m_backdropEffect = BackdropEffect::Mica;
+    BackdropCapabilities m_backdropCapabilities;
+    BackdropState m_backdropState;
+    bool m_windowTranslucent = false;
+    bool m_backdropPrimed = false;
+    bool m_backdropResolutionPending = false;
+    bool m_nativeChromeRepairPending = false;
+    bool m_fallbackDragging = false;
+    bool m_chromeInteractive = true;
+    QString m_minimizeTooltip;
+    QString m_maximizeTooltip;
+    QString m_closeTooltip;
+    QString m_restoreTooltip;
+    QString m_minimizeAccessibleName;
+    QString m_maximizeAccessibleName;
+    QString m_closeAccessibleName;
+    QString m_restoreAccessibleName;
+    QPoint m_fallbackDragOffset;
+    QRect m_hostedRestoreGeometry;
+    std::unique_ptr<WindowResizeSession> m_resizeSession;
+    std::unique_ptr<QPixmap> m_paintedSurfaceCache;
+    QSize m_paintedSurfaceCachePixelSize;
+    qreal m_paintedSurfaceCacheDpr = 0.0;
+    bool m_paintedSurfaceCacheIncludesFrame = false;
+};
+
+} // namespace fluent::windowing
+
+#endif // FLUENTWINDOW_H

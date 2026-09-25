@@ -1,0 +1,737 @@
+# Component API Consistency Audit
+
+> **Status:** Historical audit with dated addenda
+>
+> **Current rules:** [Component API conventions](component-api-conventions.md)
+
+<!-- docs-nav:top:start -->
+[Documentation](../README.md) › [Development](README.md) › Baselines and historical records
+
+[← System capability delivery record](system-capability-roadmap.md) · [Contents](../SUMMARY.md) · [Development index](README.md)
+<!-- docs-nav:top:end -->
+
+## 2026-09-18 File entry and Toast refinement
+
+`FileDropZone` adds application-owned browsing and local URL drop signals in
+`basicinput`; it does not read or upload files. `FileListView` reuses `ListView`
+with a caller-owned model and a private row delegate. Removal and retry are
+requests; the model remains authoritative. Full names and metadata wrap.
+
+Toast gains an optional `closable` property (default false) and appends
+`CloseButton` to `DismissReason`, preserving earlier enum values. Existing
+factories, placements, borrowed QAction ownership, and hover opt-in remain.
+Compact and detailed cards reuse Card, Label, FontIcon, and Button. Private
+`src/design/ToastTokens_p.h` defines Toast geometry, motion, shadow, and local
+tints for the approved Figma design; shared semantic colors still supply text
+and status colors, with HighContrast using the existing semantic palette.
+Existing Toast instances adopt this appearance. Finite motion no longer
+measures Toast text on every frame.
+
+Button measures explicit multiline captions by their widest line and complete
+height, keeping adjacent icons inside the control. Single-line measurement and
+IconOnly layout retain their existing behavior.
+
+The current ownership and input contract is [Files and feedback](../architecture/files-and-feedback.md).
+
+## 2026-09-16 Charts addition and input review
+
+This unreleased addition is reviewed against the v1.8.4 synchronization point.
+`fluent::charts` adds `ChartData`, caller-owned `ChartModel`, the shared
+`ChartView` host, and fixed `LineChart`, `AreaChart`, `BarChart`,
+`HorizontalBarChart`, `PieChart`, `DonutChart`, `ScatterChart`, and `Sparkline`
+components. Each fixed component owns a renderer translation unit. Public
+headers, PySide6 exports, Gallery routes, and accessibility inventory are
+included together; private geometry and chart-token headers are not installed.
+The module uses existing Qt Core, Gui, and Widgets dependencies.
+
+Views borrow models without reparenting; Python retains model wrappers.
+Ordered-X snapshots provide indexed viewport queries and bounded projections.
+Ordinary repaints reuse the projection, streaming updates coalesce, and hidden
+views stop scheduling projection work. The model owns O(N) storage and indexing
+costs; applications prepare large snapshots and control retention. These
+budgets are not a universal frame-time guarantee.
+
+Intentional limits are explicit in the [Charts contract](../architecture/charts.md):
+Pie and Donut render only the first attached model; their class comments and
+`addSeries()` documentation direct callers to `setModel()`. Extra models remain
+attached for generic presentation changes. Scatter shows representative points,
+dense bars show means, and large radial datasets combine a tail into `Other`.
+Log axes, stacked bars, density plots, and GPU rendering remain outside this
+initial module.
+
+The input review found that ChartView consumed Escape even with automatic
+bounds, preventing parent dialogs from handling the key. Escape now consumes
+only an explicit Cartesian X-range reset; otherwise Qt propagates the event to
+the parent. Pie and Donut always propagate it, and Fluent Dialog retains its
+own close policy. `Charts.h` is grouped with the other category umbrella headers.
+Existing component implementations are unchanged.
+
+`test_chart_model` and `test_chart_view` cover ownership, indexed large data,
+projection budgets, and input. The Escape regressions cover ordinary QDialog,
+Fluent Dialog close policies, repeated Escape after reset, and radial charts
+with a stored X range. On macOS with Qt 6.9.3, 21 automated checks passed and
+one interactive VisualCheck was skipped. The three Escape regressions also
+passed with the native Cocoa platform. API, format, generated-catalog, and
+documentation checks passed. Native appearance, Windows/Linux input behavior,
+and Qt 5 execution retain their separate platform-review boundaries.
+
+## 2026-09-13 ParticleBackdrop extraction
+
+`fluent::layout::ParticleBackdrop` is a CPU-painted decorative surface using
+normal QWidget child composition, with flowing ribbons, floating dots and
+starfield presets. Animation speed, density, maximum frame rate,
+optional pointer interaction, solid/transparent background and edge fades are
+public properties with normalized, idempotent setters. `isAnimating()` reports
+the effective timer state; `animationEnabled` remains the caller's preference.
+The default budget is 240 particles at at most 30 scheduled frames per
+second; applications can explicitly raise either limit. Gallery samples opt in
+to filling the preview row, preserving existing samples' right-hand spacing.
+Hidden or fully clipped surfaces, zero speed, disabled controls, HighContrast,
+and Reduced/Disabled Motion stop continuous updates. Application deactivation
+also pauses by default. Reparenting refreshes ancestor visibility observation.
+
+The installed header and PySide6 class ship together. Gallery Home and the three
+Layout samples compose the same public component.
+Masks affect isolated particle pixels; transparent mode preserves parent window
+materials. The component owns no content model or business action and adds no
+OpenGL module dependency. `TestParticleBackdrop.cpp` covers clipping, reparenting,
+motion policy, transparent fading, setter normalization and child input.
+Native appearance and timing remain host-specific verification boundaries.
+
+## 2026-09-12 SplashScreen extraction
+
+`fluent::status_info::SplashScreen` adds a parent-owned startup surface with
+application-supplied `QIcon`, preferred icon size, plain status text, and
+clamped determinate or indeterminate progress. `setProgress(done, total)` uses
+wide arithmetic and switches to indeterminate mode for a non-positive total.
+Reaching 100% does not dismiss the surface.
+
+`Presentation::Branded` is the default: intact artwork reveals over soft accent
+light, optional `title` / `subtitle` labels identify the application, and a
+linear indicator presents progress. `Presentation::Simple` explicitly retains
+the centered artwork and loading ring. Both presentations share progress,
+input, theme and lifecycle contracts. This changes the new component's default
+presentation and the Gallery startup; it does not add a design language.
+
+`transitionTarget` borrows a same-window icon holder for the Branded dismissal.
+Full motion moves an input-transparent private icon child into that target,
+including a title-bar sibling outside the covered host. The target keeps its
+parent, visibility and graphics effect. An unavailable target falls back to a
+fade; destruction clears the borrowed pointer. Hide, reuse and destruction
+remove the private transition child. Reduced motion uses a short fade,
+Disabled completes immediately, and decorative entrance never delays dismissal.
+The enum, properties and target setter have matching PySide6 bindings.
+
+`dismiss()` follows MotionPolicy, hides, and emits `dismissed()` exactly once.
+It does not destroy the widget. Direct `hide()` cancels a transition without a
+completion signal; `show()` after hiding restores opacity and activity.
+Spontaneous window minimization preserves an ongoing dismissal. A newly shown
+cover hides older covers on overlapping hosts, preventing focus and stacking
+recursion; separate hosts may keep independent covers. Once the new cover is
+ready, each replaced cover emits `replaced()` without `dismissed()` or automatic
+deletion. Replacement callbacks may delete the old cover or display another one.
+The visible surface filters input in its covered host and restores prior
+focus where possible. Controls outside the host and other windows remain
+available. Brand/status labels and the visible progress indicator retain their accessible
+semantics; the root exposes a busy pane and caller-owned accessible text.
+
+The installed C++ header, category umbrella, PySide6 export, and Gallery sample
+ship together. Both Gallery startup wrappers supply artwork and brand text,
+and connect dismissal and replacement to `deleteLater()`. Brand text animates
+paint opacity while retaining Label elision and accessibility; per-frame updates
+do not rewrite theme overrides or invalidate text geometry.
+Page warm-up, title-bar icon reveal, and
+startup completion remain application responsibilities.
+`TestSplashScreen.cpp` and the binding/Gallery tests own lifecycle, progress,
+input, accessibility and geometry coverage. Native captures are host-specific;
+Windows/Linux input, compositor and assistive-technology review remain manual.
+
+## 2026-09-08 theme token override addendum
+
+`UserTheme::applyOverrides()` adds an atomic, validated patch to the current
+global color, radius, and font tokens. It does not read or write a theme file.
+`FluentElement::setThemeOverrides()`, `themeOverrides()`, and
+`clearThemeOverrides()` add per-element sparse configuration. Unspecified fields
+follow the current registry; local fields survive global updates and theme
+switches. Invalid input and identical updates leave state unchanged.
+
+The default path retains the null private pointer and existing registry lookup.
+Overrides do not inherit into children or independently composed popups.
+Local font scale replaces the global scale relative to built-in role sizes;
+an explicit widget font retains precedence. A custom family clears the bundled
+face name while preserving the role's numeric weight. Spacing, motion, and
+material tokens remain outside this API.
+
+PySide6 exposes `apply_theme_overrides()`, `set_widget_theme_overrides()`, and
+`widget_theme_overrides()` with matching validation and scope. The existing
+installed public headers own the API; `ThemeSpec_p.h` remains private.
+See [Custom themes](../design-languages/custom-themes.md) for schema and examples.
+`TestThemeOverrides.cpp` covers atomicity, reset, scope, font precedence and
+weight matching, and synchronous destruction during local updates.
+
+## 2026-09-08 callback, painting, and range addendum
+
+Dialog guards its lifetime before `open()` invokes callbacks. Synchronous
+closure returns the final result; an ongoing visible exit still waits for
+completion. ToggleButton stops after destruction and reconciles reentrant
+changes to its tri-state value and Qt checked state without duplicate notices.
+For ungrouped, non-auto-exclusive buttons, `setCheckState()` and activation
+finish Qt's internal checked-state update before synchronously delivering
+`toggled`, so deletion in that callback is safe on Qt 5.15 and Qt 6.2 too.
+Grouped buttons preserve Qt's native notification order. Inherited
+`QAbstractButton::setChecked()` / `toggle()` and group callbacks retain Qt's
+lifetime rules; use `deleteLater()` when deleting from those callbacks on older
+Qt versions. `Qt::CheckState` is registered for queued notifications.
+
+An embedded StackContentHost without an explicit surface preserves its
+parent's painted background under native translucent window backdrops. The
+parent can therefore supply a local Light/Dark surface without having it
+erased by a child page host. Top-level clear and explicit overlay contracts
+remain covered by `TestNavigationView.cpp`.
+
+TabView notifies a selected-index shift when an earlier tab is removed.
+DropDownButton passes its menu-open appearance to a protected Button painting
+helper, so painting no longer changes `interactionState` or emits its signal.
+The existing font and content painting paths remain shared.
+
+Slider and ScrollBar widen range arithmetic before subtraction. Their painted
+positions follow Qt orientation, right-to-left, and inverted-appearance
+semantics. Slider also handles automatic tick intervals without dividing by
+zero and bounds tick rendering for large ranges.
+
+The owning tests cover synchronous callbacks, inherited signal counts, pointer
+input, full integer ranges, wide tracks, direction changes, and painted states.
+Public properties and existing methods remain source compatible. Native
+platform visual acceptance remains separate from these automated contracts.
+
+## 2026-09-05 callback and model-update addendum
+
+Theme notifications stop when a callback starts a newer change, including
+deferred batches. `FluentElement` retains its protected 1.x pointer slot but
+no longer allocates empty private storage.
+
+NumberBox limits combined parenthesis and power nesting to 128. Excessive
+nesting follows the invalid-input contract: preserve the text and expose NaN.
+Unary signs are parsed iteratively. Programmatic formatting finishes Qt's
+text mutation before delivering text, selection, and cursor notifications;
+value/range setters stop when callbacks destroy the control or supersede the
+value. Focused contracts compare inherited notifications with QLineEdit and
+exercise destruction from text and value callbacks.
+
+FlowView invalidates its cache after row removal and coalesces layout work
+during insertion bursts. Tail appends reuse existing rectangles; explicit
+geometry queries and scrolling still resolve pending layout immediately.
+Contracts cover removal, hit testing, scroll ranges, variable-size wrapping,
+resize, scroll anchors, and model-access counts.
+
+LineEdit's clear button now exposes a translated accessible name and defaults
+to a 24 by 24 logical-pixel target. Explicit `clearButtonSize` overrides still
+apply. The inherited change also covers NumberBox and AutoSuggestBox.
+
+The regression sources are [FluentElement](../../tests/components/TestFluentElement.cpp),
+[LineEdit](../../tests/components/textfields/TestLineEdit.cpp),
+[NumberBox](../../tests/components/textfields/TestNumberBox.cpp), and
+[FlowView](../../tests/components/collections/TestFlowView.cpp). Public component
+names and properties are unchanged; platform visual acceptance remains separate.
+
+## 2026-09-05 ToggleSwitch visual-scale addendum
+
+- Issue #61 exposed the distinction between the widget's hit area and its
+  fixed 40 × 20 visual track. `setFixedSize()` retains its existing meaning.
+- `visualScale`, `setVisualScale()`, and `visualScaleChanged(qreal)` provide
+  explicit proportional graphics sizing, with default `1.0`, finite-value
+  clamping to `0.5–10.0`, and non-finite/no-op silence. Text fonts remain separate.
+- Layout hints grow with the track and preserve a minimum interactive height.
+  Geometry changes retain the accessible role, name, state, and whole-widget
+  bounds; state transitions and keyboard/pointer behavior keep their contracts.
+- C++ and PySide6 expose the same API in this slice, with a shared Gallery
+  sample, binding manifest entry, and runtime/typing checks. The existing
+  installed-header allowlist already includes `ToggleSwitch.h`.
+- Focused contracts in `TestToggleSwitch.cpp` cover pixel preservation on widget
+  resize, proportional LTR/RTL geometry, normalization, layout hints, animation,
+  and input. `TestValueAccessibility.cpp` covers accessible bounds after scaling.
+
+## 2026-09-03 inherited input-signal addendum
+
+- The five public `QAbstractItemView`-derived collection controls were audited
+  against their inherited pointer-signal contract: `ListView`, `GridView`,
+  `FlowView`, `TreeView`, and `DataGrid`.
+- `ListView` and `FlowView` intercepted ordinary left-button input for custom
+  release-time selection but only emitted their row-based `itemClicked`
+  convenience signal. Their inherited `pressed(QModelIndex)` and
+  `clicked(QModelIndex)` signals were therefore silent.
+- `GridView`'s reorder path also intercepted presses on already-selected items.
+  It omitted inherited `pressed(QModelIndex)` and delegated release to
+  `QListView` even though the matching press had not reached the base class.
+  Consequently `clicked(QModelIndex)` depended on stale Qt press state and was
+  absent when the item had been selected programmatically before its first
+  pointer click. The intercepted path now completes both signals explicitly.
+- `TreeView` and `DataGrid` continue through their Qt base event chains and
+  already preserve both inherited signals. Focused tests now guard all five
+  components, including exact-once delivery and the GridView reorder branch.
+- A wider review of public Qt control subclasses found one additional exact-once
+  defect: `Slider` called `setSliderDown(false)`, which already emits inherited
+  `sliderReleased()`, and then emitted the same signal explicitly. The redundant
+  emission was removed and a real-pointer contract test now covers one press and
+  one release. Button, CheckBox, RadioButton, and ScrollBar already preserve
+  their Qt base input paths; split/menu button secondary hit zones remain
+  deliberate, separately tested activation surfaces.
+- The ListView Gallery cards did not expose the defect because they demonstrate
+  visible selection changes and do not connect the inherited signal to a
+  business action. Earlier ListView and GridView forwarding tests also invoked
+  `clicked(...)` synthetically instead of exercising the real pointer path.
+- The compatible repair restores the inherited signals without changing
+  release-time selection, drag suppression, row-based convenience signals, or
+  visible rendering. No new public API was added.
+
+## 2026-08-29 static governance addendum
+
+The deferred component API static check is now implemented by
+`tools/quality/validate_component_api.py` and the machine-readable
+[component API policy](component-api-policy.json). The gate cross-checks the
+installed-header allowlist, generated component catalog, declaration classes,
+focused test sources, property accessors, writable properties without notify
+signals, and legacy noun-style boolean readers.
+
+Existing 1.x exceptions are classified by exact header, class, and property.
+They are not wildcarded: a new exception fails, and a removed property or
+resolved exception leaves a stale policy entry that also fails. The validator
+runs in the reusable C++ CI planning job and as
+`ComponentApi.Contract_Stable` in the `quality`, `contract`, and `local_full`
+CTest labels. The planning job owns fast-CI execution; the full contract lane
+keeps an independent CTest registration check without repeating it in every
+platform matrix lane.
+
+This gate changes no public C++ behavior. Notify additions, compatibility
+aliases, and eventual removals remain separate reviewed API changes.
+
+## 2026-08-29 Button typography addendum
+
+- Issue #50 identified that `Button`, `DatePicker`, and `TimePicker` bypassed
+  the semantic `fontRole` contract used by other Fluent controls.
+- `Button` now defaults to the `Body` role in theme-managed mode.
+  `setFont(...)` remains a supported explicit per-control override, while a
+  later `setFontRole(...)` restores theme following even when the stored role
+  does not change. During an explicit override, `fontRole` is the role retained
+  for restoration rather than a description of the active `QFont`.
+- `DatePicker` and `TimePicker` inherit the same contract. The PySide6 public
+  surface and API manifest expose the inherited `fontRole` and
+  `setFontRole(...)` members.
+- `ToggleSwitch` keeps its existing `fontRole` API and now applies the same
+  explicit-font precedence instead of overwriting `setFont(...)` on refresh.
+- The focused C++ component family, PySide6 bindings/stubs, component API,
+  documentation, accessibility inventory, and site API catalog gates passed on
+  the Qt 6.9.3 macOS lane; exact working-tree evidence is recorded below.
+
+Date: 2026-05-26
+Change: `audit-component-api-consistency`
+
+## 2026-08-13 collection material addendum
+
+- `GridView` now matches `ListView` and `TreeView` with a source-compatible
+  `backgroundVisible` property, `isBackgroundVisible()` alias, setter, and
+  changed signal.
+- Backgroundless `ListView` and `GridView` clear stale backing-store pixels
+  only for a typed composited backdrop. The existing
+  `fluentPreserveParentSurface` opt-out prevents that explicit clear for an
+  intentionally painted parent; callers also suppress the viewport's Qt base
+  fill with `Qt::WA_NoSystemBackground` while that topology is active.
+- Focused native tests cover the property default, signal, and repeated-setter
+  no-op behavior; the PySide6 API manifest and public-surface test include the
+  new GridView property.
+
+## 2026-07-24 Phase 0/1 contract addendum
+
+The current executable contract inventory, Phase 1 resolutions, deferred
+breaking decisions, and test commands are maintained in
+[Component Contract Baseline](component-contract-baseline.md). Phase 0 captured
+target behavior as tests; Phase 1 repaired and activated the confirmed
+foundation, Label, TextEdit, overlay, elevation, and resource-startup
+contracts. The broader inheritance, ownership, and facade migrations documented
+below remain deliberately deferred.
+
+## 2026-07-27 reusable Gallery-primitives addendum
+
+The Gallery-to-UILib boundary review promoted only primitives with an
+application-independent contract:
+
+- `fluent::FontIcon` renders a caller-supplied Fluent icon glyph, size, color,
+  and rotation without owning labels or commands.
+- `fluent::layout::Card` publishes a token-backed surface, while
+  `fluent::layout::Divider` owns DPI alignment and transparent-backdrop
+  composition details.
+- `fluent::layout::Expander` owns disclosure state, animation, scroll anchoring,
+  and explicit `WidgetOwnership`; the Gallery code block now adds only
+  syntax-highlighting and copy behavior.
+- `fluent::status_info::Toast` is a same-window overlay with caller-owned text,
+  severity, placement, duration, and managed stacking up to `maximumVisible()`.
+  Gallery keeps only its title-bar offset and copy-success policy.
+
+Application-specific route models, search behavior, clipboard text, logging,
+and Gallery object names remain outside UILib. Focused component tests cover
+setter no-ops, ownership, expansion geometry, backdrop composition, overlay
+placement, resize tracking, severity icons, and managed-toast stacking.
+
+## 2026-07-27 composed component addendum
+
+The Fluent UI Web Components review contributed component contracts rather than
+web implementation details:
+
+- `fluent::layout::Accordion` composes public `Expander` items, adds
+  single/multiple expansion coordination plus WAI-style Up/Down/Home/End header
+  focus, and keeps item lifetime explicit through `WidgetOwnership`.
+- `fluent::status_info::Avatar` owns identity rendering only: caller-provided
+  name/initials/image, token sizes and shape, DPR-aware image cropping, and a
+  presence dot composed from `InfoBadge`. It does not load network images or
+  invent localized status text.
+- `fluent::basicinput::CompoundButton` derives from `Button`, retaining one
+  click/focus/keyboard target while adding a measured and elided secondary line.
+
+All three are exported through category headers and the installed-header
+allowlist, have focused contract tests, and have dedicated Gallery routes with
+live samples. Their follow-up review also registers public enum signal types for
+Qt 5, preserves fractional-DPR cover geometry and Unicode grapheme initials,
+and keeps CompoundButton's text-plus-parent construction aligned with Button.
+At this checkpoint, `Field` was deferred because editor ownership, validation state,
+helper/error composition, and accessibility relationships need a separate
+contract rather than a thin visual wrapper.
+
+## 2026-08-14 Field composition shell
+
+- `fluent::layout::Field` is a labeled editor slot, not a new input base class.
+  It reuses `WidgetOwnership`, presents helper/validation text, and forwards
+  focus/buddy/accessible relationships to the slotted editor.
+- Validation presentation never writes the editor value. `takeEditor()`
+  transfers a parentless widget; `releaseEditor()` applies the recorded
+  ownership policy. Changing ownership mode for the same editor requires an
+  explicit `takeEditor()` boundary in both C++ and PySide6.
+- Field is not a Tab stop and does not rewrite the editor's size policy.
+- Contract tests live in `test_field`. Gallery route `field` ships three live
+  samples. See [field-api-proposal.md](field-api-proposal.md).
+
+## 2026-08-01 SplitView ownership addendum
+
+- `fluent::collections::SplitView` keeps the legacy host-owned default for
+  `addPane()` and `insertPane()`, while new overloads record explicit
+  `WidgetOwnership` for each pane.
+- `releasePane()` and `releasePaneAt()` apply the recorded Owned, Borrowed, or
+  Reparented policy. `takePaneAt()` deliberately overrides that policy and
+  transfers a parentless pane to the caller.
+- Legacy `removePane()` and `removePaneAt()` preserve their prior transfer
+  behavior, so the new ownership contract is source-compatible.
+- The host rejects itself, its ancestors, duplicate panes, and null panes;
+  externally destroyed panes are removed from the pane table without leaving
+  stale geometry or signals.
+
+Focused contracts cover all release policies, host destruction, explicit
+transfer, original-parent restoration, invalid insertion, external
+destruction, and the existing layout/drag/state behavior.
+
+## 2026-07-28 editing command router addendum
+
+- `fluent::textfields::EditingCommandRouter` owns one stable set of semantic
+  editing `QAction` objects per top-level window.
+- A second router for the same top-level window is hard-rejected: its stable
+  actions remain disabled, carry no shortcuts, and are not attached to the
+  window.
+- Focus routing supports `LineEdit`, `TextEdit`, and the existing LineEdit
+  subclasses without exposing TextEdit's private `QTextEdit`.
+- Raw application Qt editors remain outside the first public contract, and
+  independent top-level windows do not share action or focus state.
+- PasswordBox Hidden and Peek modes never advertise or dispatch Cut/Copy;
+  a context-menu request also ends press-and-hold Peek before presenting the
+  disabled commands. Visible mode follows ordinary LineEdit capability.
+- Callers may customize action text, icon, and shortcuts. Router-owned enabled
+  state follows focus, selection, undo history, read-only state, enabled state,
+  and clipboard content.
+
+Focused contracts cover stable action lifetime, native shortcuts, command
+execution, read-only/clipboard refresh, unsupported targets, supported-target
+switching, multiple windows, scope destruction, TextEdit private adaptation,
+PasswordBox export policy, inherited editors, and menu activation/restoration.
+
+## 2026-07-28 CommandBar Capability Phase 3 addendum
+
+- `fluent::menus_toolbars::CommandBar` and `CommandBarFlyout` use caller-owned
+  `QAction` as their only public command item and publish explicit primary and
+  secondary semantic order.
+- The pointer-based QWidget action APIs are retained as primary shorthands;
+  explicit section methods own cross-section moves and deterministic
+  reordering.
+- Actions are borrowed without reparenting or deletion. Existing QObject
+  parents retain their ordinary Qt lifetime behavior, and action destruction
+  removes stale membership safely.
+- `QWidgetAction`, nested menus, and captionless non-separator actions are
+  rejected. A registered action that temporarily loses presentability remains
+  in its semantic section for later recovery.
+- `CommandBarFlyout::ShowMode::Transient` disables Popup focus-on-open without
+  changing the default behavior of Popup or existing subclasses. Parentless
+  and cross-window invocation targets are rejected.
+- Public enum signal types are declared as metatypes for the Qt 5.15 baseline.
+  The two public headers are exported and installed; the shared action model
+  remains private.
+- Private presenters implement deterministic priority-plus-logical-tail
+  overflow, separator normalization, inline and contextual keyboard navigation,
+  focus repair/restoration, RTL visual order, scrolling, exact activation, and
+  deletion-safe action updates.
+- Private overflow and secondary-row layouts reconcile against the exposed
+  scroll viewport immediately and once more after opening. This prevents stale
+  pre-exposure viewport widths from clipping captions without changing public
+  or installed API.
+- Accessibility is supplied by private adapters, so command roles, names,
+  accelerators, checked/disabled state, and More expansion state do not expand
+  the public or installed surface.
+- EditingCommandRouter actions remain window-scoped when reused by command
+  surfaces. Presenters retain the editor target and selection, while
+  cross-window insertion is rejected.
+- Gallery routes and public-only snippets cover responsive CommandBar overflow,
+  router-action reuse, and CommandBarFlyout show modes.
+
+Focused Capability Phase 3 contracts now cover property no-ops, section order,
+insertion and move rules, Qt shorthands, supported and rejected action kinds,
+borrowed lifetime, shared actions, responsive presentation, expansion state,
+pointer/keyboard input, focus preservation and restoration, invocation
+boundaries, point/anchor retargeting, accessibility, design-language rendering,
+router integration, and Gallery exposure. Automated validation is complete on
+Windows Qt 6.9.3 and Linux Qt 5.15.2. Focused Computer Use desktop regression
+also covers the flyout VisualCheck and Gallery overflow/focus paths; the
+final high-DPI, sanitizer teardown, and Computer Use review gate was accepted
+on 2026-07-30.
+
+## 2026-07-30 notification Capability Phase 4 addendum
+
+- `Toast` keeps unkeyed managed stacking as the default and adds optional
+  in-place refresh through a non-empty update key scoped by host and placement.
+- An optional borrowed `QAction` is presented with a Fluent button without
+  changing action ownership. Stable dismissal reasons distinguish
+  programmatic close, timeout, action activation, and managed eviction.
+- Hover pause is opt-in and preserves the remaining timeout, so the existing
+  pointer-through default remains compatible.
+- Toast accessibility follows the supported Qt baseline:
+  `QAccessibleAnnouncementEvent` on Qt 6.8 and newer, with an alert fallback on
+  earlier Qt versions. Title/message changes update the fallback accessible
+  name unless the caller set an explicit name.
+- `InfoBadge` exposes a private static-text accessibility adapter with numeric
+  value semantics in value mode. Value, display, visibility, and parent changes
+  notify the accessible hierarchy without making the badge a separate focus
+  target.
+- Borrowed-action destruction, reentrant dismissal, managed eviction, and
+  update-in-place preserve ordinary Qt ownership and deletion safety.
+
+Focused tests cover accessibility role/name/value, dismissal paths, borrowed
+action lifetime, hover pause, keyed refresh, stacking scope, and Gallery
+preview/source alignment. Windows Qt 6.9.3, Linux Qt 6.2.4, Linux Qt 5.15.2,
+ASan/UBSan teardown paths, and the final Gallery Computer Use pass are complete.
+
+## 2026-07-29 editing context-menu consistency addendum
+
+Text-selection and editing context menus now share the private
+`TextEditingMenu_p` presenter. The shared surface uses the Caption typography
+token, the WinUI 16 px command-icon slot, compact item padding, visible group
+dividers, and the standard Fluent menu shadow.
+
+| Entry point | Context-menu policy |
+| --- | --- |
+| `LineEdit`, `PasswordBox`, `AutoSuggestBox`, `NumberBox`, and ColorPicker editors | Shared Fluent editing menu through `LineEdit`; PasswordBox applies its export restrictions first. |
+| `TextEdit` private `QTextEdit` | Shared Fluent editing menu while retaining the Qt standard menu long enough for Undo/Redo dispatch. |
+| Selectable `Label`, including Gallery source and component-reference values | Shared read-only Fluent menu with Copy and Select All. |
+| Editable `ComboBox` with its normal Fluent editor | Inherits the `LineEdit` policy. |
+| Editable `ComboBox` with a caller-supplied plain `QLineEdit` | The ComboBox event filter adapts only `Qt::DefaultContextMenu`; caller-owned Custom, Actions, Prevent, and NoContextMenu policies remain untouched. |
+| `CommandBarFlyout` sample context surfaces | Intentionally use `CommandBarFlyout`, because they demonstrate a contextual command surface rather than text editing. |
+| `Window` title-bar system menu | Intentionally native: it is the operating-system window menu. |
+| Gallery system-tray menu | Intentionally native/platform-owned through `QSystemTrayIcon`. |
+| `ScrollBar` | Intentionally `Qt::NoContextMenu`. |
+
+The Gallery no longer carries a separate code-block menu implementation.
+Focused contracts cover `LineEdit`, `TextEdit`, selectable `Label`, a
+caller-supplied ComboBox editor, and the Gallery source block so new native-menu
+leaks are caught at the owning layer.
+
+## Scope
+
+This historical audit covers public component headers under `src/components/**`
+and focused tests under `tests/components/**`. New API audits should use current
+source, tests, and development docs as the active source of truth.
+
+The reusable component API checklist lives in
+[Component API Conventions](component-api-conventions.md). This document is the
+historical audit report for the `audit-component-api-consistency` change.
+
+The second pass covers 56 public component headers and 57 public component
+classes. `src/components/menus_toolbars/Menu.h` contains two public classes,
+`FluentMenu` and `FluentMenuItem`; `fluent::FluentElement`, `fluent::QMLPlus`, and private
+headers remain supporting infrastructure rather than component inventory.
+
+Core infrastructure such as `fluent::FluentElement`, `fluent::QMLPlus`, and design tokens is
+treated as supporting API rather than a component category.
+
+Namespace follow-up: `rename-component-namespace-to-fluent` deliberately moves
+the reusable component API from `view::...` to `fluent::...` with no compatibility
+aliases, typedefs, or forwarding namespaces. Future API audits should flag any
+active `view::...` component spelling outside archived history or explicit
+migration notes.
+
+## 2026-07-11 Windowing API addendum
+
+The window-background work adds a typed UILib contract without changing the
+historical component inventory above:
+
+- `Window::backdropEffect` is the caller-owned request and not a statement that a
+  native material was installed.
+- `Window::backdropState()` and `backdropStateChanged(...)` expose the resolved
+  requested/effective effect, backend, fidelity, surface mode, apply status, and
+  diagnostic reason.
+- `Window::backdropCapabilities()` exposes session capabilities for diagnostics
+  and UI explanation; consumers must not use it as proof that application
+  succeeded.
+- Descendant components use the typed helpers in `WindowBackdrop.h`, especially
+  `windowBackdropRequiresTransparentClear(...)`, instead of coupling to Gallery,
+  operating-system checks, or raw dynamic-property names.
+- `WindowBackdropMaterial` is reusable windowing infrastructure: it provides the
+  deterministic opaque Mica/Acrylic fallback while keeping application settings
+  and persistence outside UILib.
+
+The compatibility property `fluentMicaBackdrop` is not a new public decision API.
+It is retained for migration and means only that the resolved surface is
+`CompositedTransparent`. See
+[Window Chrome Architecture](../architecture/window-chrome.md) for the paint and
+platform contracts.
+
+## 2026-07-18 Title-bar activation addendum
+
+- `TitleBar::windowActive` is a read-only state with `windowActiveChanged(bool)`;
+  it mirrors `WindowActivate` / `WindowDeactivate` without changing title-bar
+  geometry, hit-test exclusions, or caller-owned content.
+- `Window` uses that state to soften client-drawn caption-button foregrounds
+  while inactive. Applications can subscribe to the same signal for their own
+  custom title content; the reusable `TitleBar` does not install opacity effects
+  on arbitrary caller widgets.
+- Repeated activation events are no-ops and do not emit duplicate state changes.
+  Focused tests cover the state signal, caption foreground response, and the
+  Gallery's no-reflow inactive treatment.
+
+## Inventory Summary
+
+| Category | Public components audited | Focused tests | Relevant specs found |
+| --- | --- | --- | --- |
+| `foundation` | FontIcon, FluentElement, QMLPlus, ThemeRegistry, UserTheme, WidgetOwnership | FontIcon focused visual contract present; infrastructure is covered by its owning contract suites | foundation contracts |
+| `layout` | Accordion, Card, Divider, Expander | Present for listed components | layout surface contracts |
+| `basicinput` | Button, CompoundButton, CheckBox, RadioButton, Slider, ComboBox, MultiSelectComboBox, ColorPicker, ToggleSwitch, ToggleButton, SplitButton, ToggleSplitButton, DropDownButton, HyperlinkButton, RepeatButton, RatingControl | Present for listed components | combobox-dropdown-flyout, multi-select-combobox-api-proposal |
+| `collections` | ListView, GridView, FlowView, TreeView, DataGrid, FlipView, SplitView, StackView, DrawerView | Present for listed components | data-grid, flow-view, gridview-drag-reorder, listview-wheel-input, listview-indicator-motion, tree-view, flipview-wheel-input, split-view, stack-view, drawer-view |
+| `date_time` | CalendarView, CalendarDatePicker, DatePicker, TimePicker | Present for listed components | calendar-date-picker, calendar-view-pager, date-picker, time-picker |
+| `dialogs_flyouts` | Dialog, ContentDialog, Popup, Flyout, TeachingTip | Present for listed components | dialog-winui3-polish, popup-overlay, flyout, teaching-tip |
+| `menus_toolbars` | CommandBar, CommandBarFlyout, FluentMenu, FluentMenuItem, MenuBar | CommandBar and CommandBarFlyout Capability Phase 3 focused tests present; FluentMenu and FluentMenuItem also have direct property/action tests | command-bar, menu-bar |
+| `navigation` | Breadcrumb, NavigationView, Pivot, SelectorBar, StackContentHost, TabView | Present for listed public components; StackContentHost lifecycle cases share the NavigationView focused target | breadcrumb, navigation-view, pivot, selector-bar, tab-view |
+| `scrolling` | ScrollBar, ScrollView, AnnotatedScrollBar, PipsPager | Present for listed components | scroll-view, annotated-scrollbar, pips-pager |
+| `status_info` | Avatar, ToolTip, InfoBar, InfoBadge, ProgressBar, ProgressRing, Shimmer, Toast | Present for listed components; Capability Phase 4 adds Toast lifecycle and InfoBadge accessibility contracts | tooltip-animation, info-bar, info-badge, progress-bar, progress-ring |
+| `textfields` | Label, LineEdit, TextEdit, AutoSuggestBox, PasswordBox, NumberBox, EditingCommandRouter | Present for listed components | label, auto-suggest-box, password-box, number-box, editing-command-router |
+| `windowing` | Window, TitleBar | Window focused test present | fluent-window, window-platform-compatibility |
+
+## Findings
+
+| ID | Severity | Category | Component path | Rationale | Action |
+| --- | --- | --- | --- | --- | --- |
+| API-001 | Medium | Open state naming | `src/components/date_time/DatePicker.h`, `src/components/date_time/TimePicker.h`, `src/components/date_time/CalendarDatePicker.h` | Button-like picker entries exposed specific getters (`isDropDownOpen`, `isCalendarOpen`) while nearby `DropDownButton` uses `isOpen`. | Applied compatible `isOpen()` aliases and focused tests. Existing specific getters remain public. |
+| API-002 | Medium | Repeated setter tests | `tests/components/date_time/TestDatePicker.cpp` | `DatePicker::setSelectedDate(...)` already suppresses duplicate signals, but the focused test did not assert the no-op behavior. | Added repeated selected-date and repeated clear assertions. |
+| API-003 | Low | Nullable values | Date/time pickers | `DatePicker`, `TimePicker`, and `CalendarDatePicker` use invalid `QDate()` or `QTime()` as empty selected values. Existing tests cover defaults and clears, but the convention was not documented durably. | Documented the nullable value convention in [Component API Conventions](component-api-conventions.md). |
+| API-004 | Medium | Open state breadth | `src/components/basicinput/SplitButton.h`, `src/components/basicinput/ToggleSplitButton.h` | Split buttons own a menu and have primary/secondary hit zones, so callers need observable menu state without inferring it from QWidget visibility. | Resolved with inherited read-only `isOpen`, `openChanged`, and menu show/hide/replacement/destruction lifecycle tests. |
+| API-005 | Medium | Popup/flyout state naming | `src/components/dialogs_flyouts/Popup.h`, `src/components/dialogs_flyouts/Flyout.h`, `src/components/dialogs_flyouts/ContentDialog.h`, `src/components/dialogs_flyouts/TeachingTip.h` | Overlay components mix Qt visibility, popup open state, light-dismiss, modal, and hosted-content semantics. A cosmetic rename could hide real behavioral differences. | Applied in 1.7-A: public `isOpen` is logical requested state; Opening/Open/Closing/Closed plus aliases are specified in [overlay-behavior.md](../architecture/overlay-behavior.md) and guarded by `Contract_*` tests. Inheritance is not unified. |
+| API-006 | Low | Collection selection naming | `src/components/collections/ListView.h`, `src/components/collections/TreeView.h`, `src/components/collections/GridView.h`, `src/components/collections/FlowView.h`, `src/components/collections/DataGrid.h` | Collection views intentionally differ: item-view based components use Qt model/delegate contracts, while ListView/TreeView expose component-specific enum names. | Marked intentional; document selection/current/item ownership expectations rather than force a rename. DataGrid reuses the shared `SelectionMode` while leaving selection behavior to `QAbstractItemView`. |
+| API-007 | Low | Caller-composed navigation | `src/components/navigation/NavigationView.h`, `src/components/navigation/StackContentHost.h`, `src/components/navigation/TabView.h` | Navigation components act as shells/hosts and must leave page choice to the application while making any Qt parent-based lifetime transfer explicit. | Resolved for NavigationView/StackContentHost with compatibility-preserving Owned, Borrowed, and Reparented policies; TabView continues to leave external page hosting entirely to the caller. |
+| API-008 | Low | Header documentation | Broad `src/components/**` | Some public properties lack explanatory header comments, especially where names are inherited from WinUI concepts. | Documented project-level checklist now; individual comments can be added when touching the owning component. |
+| API-009 | Medium | Boolean getter aliases | `src/components/collections/ListView.h`, `src/components/collections/GridView.h`, `src/components/collections/FlowView.h`, `src/components/collections/TreeView.h`, `src/components/collections/FlipView.h`, `src/components/navigation/TabView.h`, `src/components/status_info/ProgressRing.h` | Several public bool getters used noun-style names such as `borderVisible()`, `backgroundVisible()`, `showNavigationButtons()`, or `addTabButtonVisible()` while nearby components already use `is*`, `are*`, or `has*` for state queries. | Applied compatible alias getters and focused tests. Existing getters remain public. |
+| API-010 | Low | Open setter alias | `src/components/basicinput/DropDownButton.h` | `DropDownButton` exposes `isOpen()` but only had `setOpen(bool)`, while other open-state components expose `setIsOpen(bool)`. | Applied compatible `setIsOpen(bool)` alias and focused test. Existing `setOpen(bool)` remains public. |
+| API-011 | Medium | Popup property notify gaps | `src/components/dialogs_flyouts/Popup.h`, `src/components/dialogs_flyouts/TeachingTip.h`, `src/components/dialogs_flyouts/ContentDialog.h` | Some overlay properties do not expose NOTIFY signals, but adding these signals should be paired with overlay-state semantics and binding tests rather than rushed into an API audit sweep. | Applied in 1.7-A with overlay-state semantics: NOTIFY + no-op on overlay bindable properties; focused `Contract_*` tests. |
+| API-012 | Medium | Typography precedence | `src/components/basicinput/Button.h`, `src/components/basicinput/ToggleSwitch.h`, `src/components/date_time/DatePicker.h`, `src/components/date_time/TimePicker.h` | Direct font initialization bypassed the semantic role property and left theme refresh versus caller `setFont(...)` precedence implicit; ToggleSwitch overwrote explicit fonts during refresh. | Added a source-compatible `Button::fontRole` contract and aligned ToggleSwitch precedence: theme-managed by default, explicit per-control font until the next `setFontRole(...)`; pickers and PySide6 inherit the Button contract. |
+| API-013 | High | Inherited item-view input signals | `src/components/collections/ListView.cpp`, `src/components/collections/GridView.cpp`, `src/components/collections/FlowView.cpp` | Custom pointer paths silently omitted inherited `pressed(QModelIndex)` and `clicked(QModelIndex)` despite public `QAbstractItemView` inheritance. GridView's intercepted release could appear to work only when Qt retained press state from an earlier base-class click. | Restored deterministic exact-once inherited signal delivery and added real-pointer contract coverage across all five public item-view collection controls, including programmatic preselection. |
+| API-014 | High | Inherited slider input signals | `src/components/basicinput/Slider.cpp` | The custom release path called `setSliderDown(false)`, which emits `sliderReleased()`, and then emitted `sliderReleased()` a second time. | Removed the redundant emission and added a real-pointer exact-once contract test. |
+
+## Intentional Deviations
+
+- `ListView`, `GridView`, `FlowView`, `TreeView`, and `DataGrid` keep APIs matched to their Qt bases and model/delegate responsibilities. DataGrid does not add a second column schema, data store, or selection-behavior enum.
+- `NavigationView` and `StackContentHost` keep page choice and composition caller-controlled while recording explicit Owned, Borrowed, or Reparented release policies; `TabView` does not host application pages.
+- `Popup`, `Flyout`, `ContentDialog`, `Dialog`, and `TeachingTip` share observable overlay semantics (logical `isOpen`, lifecycle signals, orthogonal `modal`/`dim`/`closePolicy`) without sharing an inheritance tree. `DrawerView` keeps its own `ClosePolicy` type. Split buttons keep QMenu `isOpen`.
+- `CalendarDatePicker`, `DatePicker`, and `TimePicker` keep specific legacy getters while adding the common `isOpen()` alias for compatibility.
+- Existing noun-style boolean getters remain public for source compatibility while clearer aliases are added for new code.
+
+## Applied Fixes
+
+- Added `isOpen()` compatibility aliases to `DatePicker`, `TimePicker`, and `CalendarDatePicker`.
+- Added focused tests proving the aliases track the existing open-state getters.
+- Added focused `DatePicker` tests for repeated `setSelectedDate(...)` and repeated `clearSelectedDate()` no-op signal behavior.
+- Added compatible boolean getter aliases across audited visible/enabled state APIs:
+  - `ListView`: `isBorderVisible()`, `isBackgroundVisible()`, `isViewportHovered()`, `isSectionEnabled()`, `isSelectedIndicatorAnimationEnabled()`.
+  - `GridView`: `isBorderVisible()`, `isViewportHovered()`.
+  - `FlowView`: `isBorderVisible()`, `isViewportHovered()`.
+  - `TreeView`: `isBorderVisible()`, `isBackgroundVisible()`, `isViewportHovered()`.
+  - `FlipView`: `areNavigationButtonsVisible()`, `isPageIndicatorVisible()`.
+  - `TabView`: `areTabsClosable()`, `isAddTabButtonVisible()`, `isTabReorderEnabled()`, `areKeyboardAcceleratorsEnabled()`.
+  - `ProgressRing`: `isBackgroundVisible()`.
+- Added `DropDownButton::setIsOpen(bool)` as a compatible alias for `setOpen(bool)`.
+- 1.7-A overlay slice: public `isOpen` is logical requested state; `opening`/`opened`/`closing`/`closed` with `aboutToShow`/`aboutToHide` aliases; NOTIFY + no-op on overlay bindable properties; orthogonal `modal`/`dim`/`closePolicy`; `Dialog::setSmokeEnabled` remains the historical modal+dim bundle. See [overlay-behavior.md](../architecture/overlay-behavior.md) and [release-1.7-roadmap.md](release-1.7-roadmap.md).
+- Added observable `menu` and `isOpen` properties to `SplitButton`; `ToggleSplitButton`
+  inherits the same lifecycle contract. Menus are tracked deletion-safely and
+  replacement/external destruction are covered by focused tests.
+- Added direct `FluentMenu` and `FluentMenuItem` tests for typography change
+  notification and QAction trigger behavior.
+- Added `Button::fontRole` with `Body` as the default semantic role, retained
+  explicit `setFont(...)` overrides across theme refreshes, and made
+  `setFontRole(...)` the explicit boundary for restoring theme management.
+  `DatePicker` and `TimePicker` inherit the contract, including through
+  PySide6. `ToggleSwitch` now follows the same precedence with its existing
+  `fontRole` API.
+- Added focused tests for the new aliases in DropDownButton, ListView, GridView, FlowView, TreeView, FlipView, TabView, and ProgressRing.
+- Restored inherited `pressed(QModelIndex)` and `clicked(QModelIndex)` delivery
+  across custom ListView and FlowView pointer paths and the intercepted GridView
+  reorder path. GridView now completes the click explicitly instead of relying
+  on unmatched `QListView::mouseReleaseEvent()` state. Real-pointer tests cover
+  ListView, GridView, FlowView, TreeView, and DataGrid, including a
+  programmatically preselected GridView item, and require exact-once delivery
+  alongside existing convenience signals.
+- Restored exact-once `QAbstractSlider::sliderReleased()` delivery in `Slider`;
+  the custom visual and tooltip release work now relies on the signal emitted by
+  `setSliderDown(false)` instead of emitting a duplicate.
+- Published the durable checklist as [Component API Conventions](component-api-conventions.md) so future work can use it without depending on an agent skill path.
+
+## Deferred Follow-Ups
+
+- `standardize-overlay-open-state-semantics`: resolved in 1.7-A ([overlay-behavior.md](../architecture/overlay-behavior.md), [release-1.7-roadmap.md](release-1.7-roadmap.md)). CoachMark and DrawerView are not on the shared inheritance tree; SplitButton/DropDownButton remain QMenu `isOpen`.
+- `add-overlay-property-notify-signals`: resolved in 1.7-A for the overlay bindable properties covered by API-011 and the overlay state machine.
+- `add-component-api-static-checks`: resolved by the repository-wide static
+  property/catalog gate recorded in the 2026-08-29 addendum and the active
+  [technical debt roadmap](technical-debt-roadmap.md).
+- `document-public-property-comments`: add targeted header comments for ambiguous public properties as components are touched.
+
+## Validation Notes
+
+- The 2026-09-03 inherited input-signal repairs passed six focused component
+  targets on macOS Qt 6.9.3: 300 executed tests passed and 15 existing
+  manual/platform-dependent cases were skipped (nine GridView drag cases and
+  six VisualCheck cases). Eight direct pointer-signal contracts passed across
+  ListView, GridView, FlowView, TreeView, DataGrid, and Slider. The changes do
+  not alter rendered pixels, and no skipped VisualCheck is claimed as visual
+  approval.
+- The same working tree built `fluent_qt_gallery` and passed the component API,
+  accessibility inventory, visual evidence inventory, documentation
+  navigation, and documentation validation gates.
+- Date/time picker code changes were validated with focused builds and direct test binaries.
+- Alias sweep code changes were validated with focused builds and CTest label filters for `test_dropdown_button`, `test_list_view`, `test_grid_view`, `test_flow_view`, `test_tree_view`, `test_flip_view`, `test_tab_view`, and `test_progress_ring`: 289 tests passed, 0 failed, 8 VisualCheck tests skipped through `SKIP_VISUAL_TEST`.
+- Split/menu lifecycle changes were validated with the focused DropDownButton,
+  SplitButton, ToggleSplitButton, and Menu binaries: 22 automated tests passed,
+  0 failed, and 3 VisualCheck tests were skipped through `SKIP_VISUAL_TEST`.
+- Broad category audits that produced report-only findings did not need automated test changes because no production behavior was modified.
+- Issue #50 focused C++ coverage passed across 11 Button-family and picker test
+  binaries: 122 automated tests passed and 10 interactive VisualCheck cases
+  were skipped through `SKIP_VISUAL_TEST=1`.
+- The Qt/PySide6 6.9.3 binding regenerated and verified stubs for 90 classes,
+  then passed the complete `test_pyside6_bindings` CTest target. The API policy
+  reported 0 active deprecations, and the component API gate validated 514
+  properties.
+- Documentation navigation and validation, the 70-component accessibility
+  inventory, and `site/api/catalog.json` checks passed for the same working
+  tree.
+
+<!-- docs-nav:bottom:start -->
+---
+[← System capability delivery record](system-capability-roadmap.md) · [Contents](../SUMMARY.md) · [Development index](README.md)
+<!-- docs-nav:bottom:end -->

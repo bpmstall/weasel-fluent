@@ -1,0 +1,231 @@
+#ifndef COMBOBOX_H
+#define COMBOBOX_H
+
+#include <QComboBox>
+#include <QPoint>
+#include <QPointer>
+#include <QStyledItemDelegate>
+#include "compatibility/QtCompat.h"
+#include "components/foundation/FluentElement.h"
+#include "components/foundation/QMLPlus.h"
+#include "design/Typography.h"
+#include "design/Spacing.h"
+
+class QAbstractItemView;
+class QPropertyAnimation;
+class QKeyEvent;
+class QLineEdit;
+class QWheelEvent;
+
+namespace fluent::textfields {
+class LineEdit;
+}
+
+namespace fluent::basicinput {
+
+// ─── ComboBox popup delegate. zh_CN: ComboBox 弹层代理 ─────────────────────
+
+/**
+ * @brief Delegate that paints ComboBox popup rows with Fluent metrics.
+ * zh_CN: 使用 Fluent 尺寸和颜色绘制 ComboBox 弹层行的 delegate。
+ *
+ * ComboBoxItemDelegate keeps popup row rendering aligned with the owning
+ * ComboBox theme host instead of relying on the platform item delegate.
+ * zh_CN: ComboBoxItemDelegate 通过所属 ComboBox 的主题宿主对齐弹层行渲染，
+ * 避免依赖平台默认 item delegate。
+ */
+class ComboBoxItemDelegate : public QStyledItemDelegate {
+    Q_OBJECT
+public:
+    explicit ComboBoxItemDelegate(FluentElement* themeHost, QAbstractItemView* view,
+                                  QObject* parent = nullptr);
+
+    void paint(QPainter* painter, const QStyleOptionViewItem& option,
+               const QModelIndex& index) const override;
+    QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override;
+
+private:
+    FluentElement* m_themeHost = nullptr;
+    QAbstractItemView* m_view = nullptr;
+};
+
+/**
+ * @brief Fluent combo box with custom popup and token-driven button surface.
+ * zh_CN: 使用自定义弹层和 token 驱动按钮表面的 Fluent 组合框。
+ *
+ * ComboBox keeps QComboBox model semantics while replacing the closed surface,
+ * chevron affordance, editable line edit, and popup chrome with repository controls.
+ * zh_CN: ComboBox 保留 QComboBox 的 model 语义，同时用项目控件接管闭合表面、
+ * 下拉箭头、可编辑输入框和弹层外观。
+ */
+class ComboBox : public QComboBox, public FluentElement, public QMLPlus {
+    Q_OBJECT
+    /**
+     * @brief Fluent typography role used for text rendering.
+     * zh_CN: 文本绘制使用的 Fluent 排版角色。
+     */
+    Q_PROPERTY(Typography::FontRole fontRole READ fontRole WRITE setFontRole NOTIFY fontRoleChanged)
+    /**
+     * @brief Horizontal content padding in pixels.
+     * zh_CN: 内容区域水平内边距，单位为像素。
+     */
+    Q_PROPERTY(
+        int contentPaddingH READ contentPaddingH WRITE setContentPaddingH NOTIFY layoutChanged)
+    /**
+     * @brief Vertical content padding in pixels.
+     * zh_CN: 内容区域垂直内边距，单位为像素。
+     */
+    Q_PROPERTY(
+        int contentPaddingV READ contentPaddingV WRITE setContentPaddingV NOTIFY layoutChanged)
+    /**
+     * @brief Iconfont glyph used for the chevron affordance.
+     * zh_CN: 下拉箭头使用的 iconfont 字符。
+     */
+    Q_PROPERTY(QString chevronGlyph READ chevronGlyph WRITE setChevronGlyph NOTIFY chevronChanged)
+    /**
+     * @brief Chevron glyph pixel size.
+     * zh_CN: 下拉箭头图标像素尺寸。
+     */
+    Q_PROPERTY(int chevronSize READ chevronSize WRITE setChevronSize NOTIFY chevronChanged)
+    /**
+     * @brief Pixel offset applied to chevron drawing.
+     * zh_CN: 下拉箭头绘制时应用的像素偏移。
+     */
+    Q_PROPERTY(QPoint chevronOffset READ chevronOffset WRITE setChevronOffset NOTIFY chevronChanged)
+    /**
+     * @brief Popup offset from its anchor in pixels.
+     * zh_CN: 弹层相对锚点的像素偏移。
+     */
+    Q_PROPERTY(int popupOffset READ popupOffset WRITE setPopupOffset NOTIFY layoutChanged)
+    /**
+     * @brief Animated press progress used by the painted surface.
+     * zh_CN: 自绘表面使用的按压动画进度。
+    */
+    Q_PROPERTY(qreal pressProgress READ pressProgress WRITE setPressProgress)
+
+public:
+    explicit ComboBox(QWidget* parent = nullptr);
+    ~ComboBox() override;
+
+    // --- Appearance ---
+    Typography::FontRole fontRole() const { return m_fontRole; }
+    /**
+     * @brief Restores theme-managed typography, even when the role is unchanged.
+     * zh_CN: 恢复主题排版；角色未变化时也会清除显式字体覆盖。
+     */
+    void setFontRole(Typography::FontRole role);
+    /**
+     * @brief Sets the field, editor and dropdown font independently of theme refreshes.
+     * zh_CN: 设置闭合框、编辑框和下拉列表的字体，主题刷新后仍保留。
+     */
+    void setFont(const QFont& font);
+
+    int contentPaddingH() const { return m_contentPaddingH; }
+    void setContentPaddingH(int px);
+
+    int contentPaddingV() const { return m_contentPaddingV; }
+    void setContentPaddingV(int px);
+
+    QString chevronGlyph() const { return m_chevronGlyph; }
+    void setChevronGlyph(const QString& glyph);
+
+    int chevronSize() const { return m_chevronSize; }
+    void setChevronSize(int size);
+
+    QPoint chevronOffset() const { return m_chevronOffset; }
+    void setChevronOffset(const QPoint& offset);
+
+    int popupOffset() const { return m_popupOffset; }
+    void setPopupOffset(int offset);
+
+    qreal pressProgress() const { return m_pressProgress; }
+    void setPressProgress(qreal p);
+
+    // --- Editable ---
+    /**
+     * @brief Enables the native QComboBox editable contract with a Fluent editor.
+     * zh_CN: 使用 Fluent 编辑器启用原生 QComboBox 可编辑契约。
+     */
+    void setEditable(bool editable);
+
+    /**
+     * @brief Replaces the QComboBox editor and synchronizes Fluent layout state.
+     * zh_CN: 替换 QComboBox 编辑器并同步 Fluent 布局状态。
+     */
+    void setLineEdit(QLineEdit* edit);
+
+    fluent::textfields::LineEdit* fluentLineEdit() const;
+
+    // --- QComboBox overrides ---
+    QAbstractItemModel* model() const { return QComboBox::model(); }
+    void setModel(QAbstractItemModel* model) FLUENT_QT6_ONLY_OVERRIDE;
+    void showPopup() override;
+    void hidePopup() override;
+
+    QSize sizeHint() const override;
+
+signals:
+    void fontRoleChanged();
+    void layoutChanged();
+    void chevronChanged();
+
+protected:
+    bool event(QEvent* event) override;
+    void changeEvent(QEvent* event) override;
+    void paintEvent(QPaintEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
+    void enterEvent(FluentEnterEvent* event) override;
+    void leaveEvent(QEvent* event) override;
+    void wheelEvent(QWheelEvent* event) override;
+    void keyPressEvent(QKeyEvent* event) override;
+    void mousePressEvent(QMouseEvent* event) override;
+    void mouseReleaseEvent(QMouseEvent* event) override;
+    void mouseMoveEvent(QMouseEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
+
+    void onThemeUpdated() override;
+
+private:
+    friend class ComboBoxPopup;
+    void initAnimation();
+    void onPopupHidden();
+    void synchronizeLineEdit();
+    void layoutLineEdit();
+    void applyLineEditStyle();
+    void applyFontRole();
+    void synchronizeFont();
+
+    // --- Configurable design tokens ---
+    Typography::FontRole m_fontRole = Typography::FontRole::Body;
+    bool m_hasExplicitFont = false;
+    bool m_applyingFontRole = false;
+    int m_autoHeight = ::Spacing::ControlHeight::Standard;
+    int m_contentPaddingH = ::Spacing::Padding::ComboBoxHorizontal;
+    int m_contentPaddingV = ::Spacing::Padding::ComboBoxVertical;
+    QString m_chevronGlyph = Typography::Icons::ChevronDownMed;
+    int m_chevronSize = Typography::IconSize::Compact;
+    QPoint m_chevronOffset{::Spacing::Padding::ComboBoxHorizontal, 0};
+    int m_popupOffset = ::Spacing::Small; // 8px keeps the dropdown shadow clear of its anchor
+
+    // --- State ---
+    bool m_hovered = false;
+    bool m_pressed = false;
+    bool m_chevronHovered = false;
+    bool m_popupVisible = false;
+    bool m_ignoreNextPopupPress = false;
+    qreal m_pressProgress = 0.0;
+
+    QPropertyAnimation* m_pressAnimation = nullptr;
+
+    // --- Editable ---
+    QPointer<QLineEdit> m_observedLineEdit;
+    bool m_editorMutationInProgress = false;
+
+    // --- Popup ---
+    class ComboBoxPopup;
+    QPointer<ComboBoxPopup> m_popup;
+};
+
+} // namespace fluent::basicinput
+
+#endif // COMBOBOX_H

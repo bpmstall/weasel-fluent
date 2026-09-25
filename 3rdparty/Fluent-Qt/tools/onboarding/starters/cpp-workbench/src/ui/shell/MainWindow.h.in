@@ -1,0 +1,28 @@
+#pragma once
+
+#include <FluentQt/Windowing.h>
+
+namespace fluent::textfields {
+class Label;
+}
+namespace @APP_NAMESPACE@::application {
+class WorkspaceController;
+struct WorkspaceViewState;
+}
+namespace @APP_NAMESPACE@::ui {
+class WorkspacePage;
+
+class MainWindow final : public fluent::windowing::Window {
+public:
+    explicit MainWindow(application::WorkspaceController& controller);
+
+private:
+    void render(const application::WorkspaceViewState& state);
+
+    application::WorkspaceController& m_controller;
+    WorkspacePage* m_page = nullptr;
+    fluent::textfields::Label* m_navigationTitle = nullptr;
+    fluent::textfields::Label* m_navigationPath = nullptr;
+};
+
+} // namespace @APP_NAMESPACE@::ui
